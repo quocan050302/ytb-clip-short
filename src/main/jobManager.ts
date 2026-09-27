@@ -286,6 +286,11 @@ export class JobManager {
         JSON.stringify(segments, null, 2),
         'utf8'
       );
+      fs.writeFileSync(
+        path.join(job.jobDir, 'transcript', 'silences.json'),
+        JSON.stringify(silences, null, 2),
+        'utf8'
+      );
 
       // 3. Generate candidate clips
       this.addLog(jobId, 'info', `Bắt đầu tính điểm Hook, Pacing, Payoff và tạo các đoạn clip đề xuất (${job.settings.targetClipCount} clips)...`);
@@ -499,7 +504,22 @@ export class JobManager {
 
     const cand = job.candidates.find((c) => c.id === candidateId);
     if (cand) {
-      cand.assetPlan = migrateAssetPlan(assetPlan, cand.duration);
+      const migrated = migrateAssetPlan(assetPlan, cand.duration);
+      // Validate asset files exist
+      for (const evt of migrated.sfxEvents || []) {
+        if (evt.enabled !== false && evt.asset?.filePath) {
+          if (!fs.existsSync(evt.asset.filePath)) {
+            this.addLog(
+              jobId,
+              'warn',
+              `Cảnh báo: File SFX "${evt.asset.name}" (${evt.asset.filePath}) không tồn tại trên ổ đĩa.`,
+              candidateId
+            );
+          }
+        }
+      }
+
+      cand.assetPlan = migrated;
       syncAssetPlanToEditPlan(cand);
       fs.writeFileSync(
         path.join(job.jobDir, 'candidates', 'candidates.json'),
@@ -509,6 +529,55 @@ export class JobManager {
       this.addLog(jobId, 'info', `Cập nhật Kế hoạch Asset (Meme/SFX/BGM) cho clip "${cand.title}"`, candidateId);
       this.notifyUpdate(job);
     }
+    return job;
+  }
+
+  /**
+   * Rescan SFX proposals for a candidate with the latest SFX catalog
+   */
+  async rescanCandidateSfx(jobId: string, candidateId: string): Promise<JobMetadata> {
+    const job = this.jobs.get(jobId);
+    if (!job) throw new Error(`Job ${jobId} not found`);
+
+    const cand = job.candidates.find((c) => c.id === candidateId);
+    if (!cand) throw new Error(`Candidate ${candidateId} not found in job ${jobId}`);
+
+    const catalogCount = this.autoAssetPlanner.getAssetProvider().getAllAssetsSync('sfx').length;
+
+    let silences = [];
+    const silencesPath = path.join(job.jobDir, 'transcript', 'silences.json');
+    if (fs.existsSync(silencesPath)) {
+      try {
+        silences = JSON.parse(fs.readFileSync(silencesPath, 'utf8'));
+      } catch {
+        silences = [];
+      }
+    }
+
+    const newPlan = this.autoAssetPlanner.rescanCandidateSfx(
+      cand,
+      job.settings,
+      job.transcript || [],
+      silences,
+      cand.assetPlan
+    );
+
+    cand.assetPlan = newPlan;
+    syncAssetPlanToEditPlan(cand);
+
+    fs.writeFileSync(
+      path.join(job.jobDir, 'candidates', 'candidates.json'),
+      JSON.stringify(job.candidates, null, 2),
+      'utf8'
+    );
+
+    this.addLog(
+      jobId,
+      'info',
+      `Quét lại đề xuất SFX cho clip "${cand.title}" (${catalogCount} sound trong catalog, ${cand.assetPlan?.sfxEvents?.length || 0} SFX timeline)`,
+      candidateId
+    );
+    this.notifyUpdate(job);
     return job;
   }
 

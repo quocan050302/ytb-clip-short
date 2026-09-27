@@ -182,8 +182,19 @@ function setupIpcHandlers(): void {
     }
   );
 
+  ipcMain.handle(
+    'job:rescanCandidateSfx',
+    async (_, jobId: string, candidateId: string) => {
+      return await jobManager.rescanCandidateSfx(jobId, candidateId);
+    }
+  );
+
   ipcMain.handle('asset:getAll', async (_, type?: 'meme' | 'sfx' | 'music') => {
     return await jobManager.getAutoAssetPlanner().getAssetProvider().getAllAssets(type);
+  });
+
+  ipcMain.handle('asset:getCatalogStats', async () => {
+    return jobManager.getAutoAssetPlanner().getAssetProvider().getCatalogStats();
   });
 
   ipcMain.handle('asset:getTrends', async () => {

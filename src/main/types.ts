@@ -160,6 +160,20 @@ export interface ImportResult {
   failed: Array<{ path: string; error: string }>;
 }
 
+export interface SfxChoice {
+  asset: AssetItem;
+  score: number;
+  reason: string;
+}
+
+export interface CatalogStats {
+  totalSfx: number;
+  defaultWavCount: number;
+  repoMp3Count: number;
+  importedCount: number;
+  failedFiles: Array<{ path: string; error: string }>;
+}
+
 export interface MomentCandidate {
   id: string;
   timestamp: number; // seconds relative to clip start
@@ -169,6 +183,7 @@ export interface MomentCandidate {
   suggestedSfx?: AssetItem;
   reason?: string;
   status: 'suggested' | 'approved' | 'rejected' | 'modified';
+  topChoices?: SfxChoice[];
 }
 
 // ─── Legacy Beat / Asset Plan (kept for backward compat) ─────────────────────

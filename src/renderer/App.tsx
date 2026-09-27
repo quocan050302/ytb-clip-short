@@ -417,7 +417,9 @@ export const App: React.FC = () => {
       {candidateForAssetPlan && (
         <AssetPlanModal
           candidate={candidateForAssetPlan}
+          jobId={currentJob?.id}
           onSave={handleSaveAssetPlan}
+          onPlanUpdatedInJob={(updatedJob) => setCurrentJob(updatedJob)}
           onClose={() => setCandidateForAssetPlan(null)}
         />
       )}

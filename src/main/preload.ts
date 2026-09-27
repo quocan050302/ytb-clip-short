@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   AssetItem,
+  CatalogStats,
   ClipAssetPlan,
   ClipCandidate,
   EnvironmentStatus,
@@ -29,7 +30,9 @@ export interface IElectronAPI {
   analyzeVideo: (jobId: string, srtContent?: string) => Promise<JobMetadata>;
   updateCandidates: (jobId: string, candidates: ClipCandidate[]) => Promise<JobMetadata>;
   updateCandidateAssetPlan: (jobId: string, candidateId: string, plan: ClipAssetPlan) => Promise<JobMetadata>;
+  rescanCandidateSfx: (jobId: string, candidateId: string) => Promise<JobMetadata>;
   getAllAssets: (type?: 'meme' | 'sfx' | 'music') => Promise<AssetItem[]>;
+  getCatalogStats: () => Promise<CatalogStats>;
   getTrends: () => Promise<any[]>;
   renderAllCandidates: (jobId: string) => Promise<JobMetadata>;
   renderSingleClip: (jobId: string, clipId: string) => Promise<RenderedClip>;
@@ -75,7 +78,10 @@ const api: IElectronAPI = {
     ipcRenderer.invoke('job:updateCandidates', jobId, candidates),
   updateCandidateAssetPlan: (jobId, candidateId, plan) =>
     ipcRenderer.invoke('job:updateAssetPlan', jobId, candidateId, plan),
+  rescanCandidateSfx: (jobId, candidateId) =>
+    ipcRenderer.invoke('job:rescanCandidateSfx', jobId, candidateId),
   getAllAssets: (type) => ipcRenderer.invoke('asset:getAll', type),
+  getCatalogStats: () => ipcRenderer.invoke('asset:getCatalogStats'),
   getTrends: () => ipcRenderer.invoke('asset:getTrends'),
   renderAllCandidates: (jobId) =>
     ipcRenderer.invoke('job:renderAll', jobId),

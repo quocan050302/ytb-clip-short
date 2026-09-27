@@ -100,7 +100,9 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
         ffmpegArgs.push('-i', ae.assetPath);
         audioInputs.push({ inputIdx: nextInput++, plan: ae });
       } else {
-        reportLog(`[RenderEngine] WARN: Audio event asset missing: ${ae.assetPath} – skipping`);
+        reportLog(
+          `[RenderEngine][${clipId}] LỖI: File SFX "${ae.assetPath}" cho sự kiện "${ae.id}" không tồn tại trên ổ đĩa – bỏ qua sự kiện này (không tự thay thế bằng âm thanh khác)`
+        );
       }
     }
   }

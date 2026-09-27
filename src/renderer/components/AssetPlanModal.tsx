@@ -30,6 +30,7 @@ import {
   AssetItem,
   BeatEvent,
   BeatType,
+  CatalogStats,
   ClipAssetPlan,
   ClipCandidate,
   MomentCandidate,
@@ -39,19 +40,27 @@ import { SfxLibraryModal } from './SfxLibraryModal';
 
 interface AssetPlanModalProps {
   candidate: ClipCandidate;
+  jobId?: string;
   onSave: (updatedPlan: ClipAssetPlan) => void;
   onClose: () => void;
+  onPlanUpdatedInJob?: (updatedJob: any) => void;
 }
 
 export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
   candidate,
+  jobId,
   onSave,
   onClose,
+  onPlanUpdatedInJob,
 }) => {
   const [availableMemes, setAvailableMemes] = useState<AssetItem[]>([]);
   const [availableSfx, setAvailableSfx] = useState<AssetItem[]>([]);
   const [availableMusic, setAvailableMusic] = useState<AssetItem[]>([]);
+  const [catalogStats, setCatalogStats] = useState<CatalogStats | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [isRescanning, setIsRescanning] = useState<boolean>(false);
+  const [libraryChanged, setLibraryChanged] = useState<boolean>(false);
+  const [rescanFeedback, setRescanFeedback] = useState<string | null>(null);
 
   // Audio audition state
   const [playingAssetId, setPlayingAssetId] = useState<string | null>(null);
@@ -122,14 +131,16 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
     async function loadAssets() {
       try {
         if (window.electronAPI) {
-          const [memes, sfxList, musicList] = await Promise.all([
+          const [memes, sfxList, musicList, stats] = await Promise.all([
             window.electronAPI.getAllAssets('meme'),
             window.electronAPI.getAllAssets('sfx'),
             window.electronAPI.getAllAssets('music'),
+            window.electronAPI.getCatalogStats ? window.electronAPI.getCatalogStats() : Promise.resolve(null),
           ]);
           setAvailableMemes(memes);
           setAvailableSfx(sfxList);
           setAvailableMusic(musicList);
+          if (stats) setCatalogStats(stats);
         }
       } catch (err) {
         console.error('Failed to load library assets:', err);
@@ -362,6 +373,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
       const res = await window.electronAPI.importSfxDialog(mode);
       if (res && res.imported.length > 0) {
         await handleRefreshSfxAssets();
+        setLibraryChanged(true);
       }
     } catch (err) {
       console.error('Import from Finder failed:', err);
@@ -371,10 +383,42 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
   const handleRefreshSfxAssets = async () => {
     if (!window.electronAPI) return;
     try {
-      const sfxList = await window.electronAPI.getAllAssets('sfx');
+      const [sfxList, stats] = await Promise.all([
+        window.electronAPI.getAllAssets('sfx'),
+        window.electronAPI.getCatalogStats ? window.electronAPI.getCatalogStats() : Promise.resolve(null),
+      ]);
       setAvailableSfx(sfxList);
+      if (stats) setCatalogStats(stats);
     } catch (err) {
       console.error('Failed to reload SFX:', err);
+    }
+  };
+
+  const handleRescanSfx = async () => {
+    if (!window.electronAPI) return;
+    setIsRescanning(true);
+    setRescanFeedback(null);
+    try {
+      if (jobId) {
+        const updatedJob = await window.electronAPI.rescanCandidateSfx(jobId, candidate.id);
+        const updatedCand = updatedJob.candidates?.find((c: any) => c.id === candidate.id);
+        if (updatedCand?.assetPlan) {
+          setPlan(JSON.parse(JSON.stringify(updatedCand.assetPlan)));
+          setSuggestedMoments(JSON.parse(JSON.stringify(updatedCand.assetPlan.suggestedMoments || [])));
+        }
+        if (onPlanUpdatedInJob) {
+          onPlanUpdatedInJob(updatedJob);
+        }
+      }
+      await handleRefreshSfxAssets();
+      setLibraryChanged(false);
+      setRescanFeedback('Đã quét lại đề xuất SFX thành công cho Short này từ catalog mới nhất!');
+      setTimeout(() => setRescanFeedback(null), 5000);
+    } catch (err: any) {
+      console.error('Rescan failed:', err);
+      setRescanFeedback(`Lỗi quét lại SFX: ${err.message}`);
+    } finally {
+      setIsRescanning(false);
     }
   };
 
@@ -593,19 +637,113 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
               <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: 2 }}>
                 Tự động đối chiếu 2 phía: nội dung bối cảnh clip (lời thoại thật, khoảng lặng, beat) &amp; thư viện SFX (tags, tính chất âm). Không tự rải SFX bừa bãi.
               </div>
+              <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span
+                  className="badge"
+                  style={{
+                    fontSize: '0.72rem',
+                    background: 'rgba(59, 130, 246, 0.15)',
+                    color: '#93C5FD',
+                    border: '1px solid rgba(59, 130, 246, 0.3)',
+                    padding: '2px 8px',
+                  }}
+                >
+                  Đã nạp {availableSfx.length} SFX (
+                  {catalogStats
+                    ? `${catalogStats.defaultWavCount} mặc định, ${catalogStats.repoMp3Count} từ repo${catalogStats.importedCount ? `, ${catalogStats.importedCount} đã nhập` : ''}`
+                    : `${availableSfx.length} sound trong catalog`}
+                  )
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                  • 4 trạng thái: [1] Trong thư viện ➔ [2] Được AI đề xuất ➔ [3] Đã thêm vào timeline ➔ [4] Đã render vào MP4
+                </span>
+              </div>
             </div>
 
-            {suggestedMoments.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <button
-                className="btn btn-primary btn-sm"
-                onClick={handleApplyAllSuggested}
-                style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.78rem' }}
-                title="Thêm tất cả các SFX được đề xuất phù hợp vào timeline bên dưới"
+                className="btn btn-secondary btn-sm"
+                onClick={handleRescanSfx}
+                disabled={isRescanning}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: '0.78rem',
+                  borderColor: libraryChanged ? '#F59E0B' : undefined,
+                  color: libraryChanged ? '#FCD34D' : undefined,
+                }}
+                title="Đánh giá lại toàn bộ SFX trong catalog cho từng khoảnh khắc của Short này"
               >
-                <CheckCheck size={14} /> Áp dụng các đề xuất phù hợp
+                <RefreshCw size={14} className={isRescanning ? 'spin' : ''} />
+                {isRescanning ? 'Đang quét lại...' : 'Quét lại SFX cho Short này'}
               </button>
-            )}
+
+              {suggestedMoments.length > 0 && (
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={handleApplyAllSuggested}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.78rem' }}
+                  title="Thêm tất cả các SFX được đề xuất phù hợp vào timeline bên dưới"
+                >
+                  <CheckCheck size={14} /> Áp dụng các đề xuất phù hợp
+                </button>
+              )}
+            </div>
           </div>
+
+          {/* Outdated library warning */}
+          {libraryChanged && (
+            <div
+              style={{
+                background: 'rgba(245, 158, 11, 0.15)',
+                border: '1px solid #F59E0B',
+                borderRadius: 'var(--radius-sm)',
+                padding: '8px 12px',
+                marginBottom: 12,
+                fontSize: '0.78rem',
+                color: '#FCD34D',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <AlertTriangle size={15} color="#F59E0B" />
+                <span>Thư viện SFX vừa có thay đổi. Bảng đề xuất hiện tại có thể đang dùng kết quả cũ.</span>
+              </div>
+              <button
+                className="btn btn-sm"
+                style={{ background: '#F59E0B', color: '#000', padding: '2px 8px', fontSize: '0.72rem', fontWeight: 600 }}
+                onClick={handleRescanSfx}
+                disabled={isRescanning}
+              >
+                Quét lại ngay
+              </button>
+            </div>
+          )}
+
+          {/* Rescan feedback banner */}
+          {rescanFeedback && (
+            <div
+              style={{
+                background: 'rgba(16, 185, 129, 0.15)',
+                border: '1px solid #10B981',
+                borderRadius: 'var(--radius-sm)',
+                padding: '8px 12px',
+                marginBottom: 12,
+                fontSize: '0.78rem',
+                color: '#6EE7B7',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              <CheckCircle2 size={15} color="#10B981" />
+              <span>{rescanFeedback}</span>
+            </div>
+          )}
 
           {suggestedMoments.length === 0 ? (
             <div
@@ -618,7 +756,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
                 borderRadius: 'var(--radius-sm)',
               }}
             >
-              Chưa có khoảnh khắc nổi bật nào cần chèn âm thanh theo transcript thật. Bạn có thể tự thêm SFX từ thư viện bên dưới.
+              Chưa có khoảnh khắc nổi bật nào cần chèn âm thanh theo transcript thật. Bạn có thể tự thêm SFX từ thư viện bên dưới hoặc bấm <strong>"Quét lại SFX cho Short này"</strong>.
             </div>
           ) : (
             <div style={{ overflowX: 'auto' }}>
@@ -690,20 +828,54 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
                         </td>
 
                         {/* 3. Proposed SFX */}
-                        <td style={{ padding: '8px 6px', minWidth: 160 }}>
+                        <td style={{ padding: '8px 6px', minWidth: 180 }}>
                           {m.suggestedSfx ? (
                             <div>
-                              <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>
-                                {m.suggestedSfx.name}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                <span style={{ fontWeight: 600, color: 'var(--text-main)' }}>
+                                  {m.suggestedSfx.name}
+                                </span>
+                                <span
+                                  className="badge badge-secondary"
+                                  style={{ fontSize: '0.65rem', padding: '0px 4px' }}
+                                >
+                                  {['sfx_whoosh', 'sfx_vine_boom', 'sfx_bell_ting', 'sfx_bruh'].includes(m.suggestedSfx.id)
+                                    ? 'Mặc định'
+                                    : m.suggestedSfx.id.startsWith('imported_sfx_')
+                                    ? 'Đã nhập'
+                                    : 'Repo'}
+                                </span>
                               </div>
-                              <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>
-                                Tag: {(m.suggestedSfx.tags || []).slice(0, 3).join(', ')}
+                              <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)', marginTop: 2 }}>
+                                File: <code>{m.suggestedSfx.originalFilename || m.suggestedSfx.name}</code> • Tag: {(m.suggestedSfx.tags || []).slice(0, 3).join(', ')}
                               </div>
+                              {/* Top choices chips */}
+                              {m.topChoices && m.topChoices.length > 1 && (
+                                <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                                  <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>Gợi ý khác:</span>
+                                  {m.topChoices.slice(0, 3).map((choice, cIdx) => (
+                                    <button
+                                      key={choice.asset.id}
+                                      className={`btn btn-sm ${choice.asset.id === m.suggestedSfx?.id ? 'btn-primary' : 'btn-secondary'}`}
+                                      style={{ padding: '1px 5px', fontSize: '0.65rem' }}
+                                      onClick={() => handleChangeMomentSfx(m.id, choice.asset)}
+                                      title={`${choice.asset.name}: ${choice.score}đ — ${choice.reason}`}
+                                    >
+                                      #{cIdx + 1} {choice.asset.name} ({choice.score}đ)
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           ) : (
-                            <span style={{ color: 'var(--text-dim)', fontStyle: 'italic' }}>
-                              (Chưa có SFX khớp)
-                            </span>
+                            <div>
+                              <div style={{ color: '#F59E0B', fontWeight: 600, fontSize: '0.74rem' }}>
+                                Không có SFX phù hợp (Cần duyệt)
+                              </div>
+                              <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>
+                                Chưa đủ bằng chứng để gán sound. Hãy chọn sound từ menu bên phải nếu muốn.
+                              </div>
+                            </div>
                           )}
                         </td>
 
@@ -761,7 +933,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
                                   fontWeight: 600,
                                 }}
                               >
-                                <Check size={12} /> Đã thêm
+                                <Check size={12} /> Đã vào timeline
                               </span>
                             ) : (
                               <button
@@ -781,7 +953,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
                               style={{
                                 fontSize: '0.72rem',
                                 padding: '3px 6px',
-                                maxWidth: 110,
+                                maxWidth: 130,
                                 cursor: 'pointer',
                               }}
                               value={m.suggestedSfx?.id || ''}
@@ -789,16 +961,23 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
                                 const found = availableSfx.find((s) => s.id === e.target.value);
                                 if (found) handleChangeMomentSfx(m.id, found);
                               }}
-                              title="Đổi sang SFX khác từ thư viện"
+                              title="Đổi sang SFX khác từ toàn bộ catalog"
                             >
                               <option value="" disabled>
                                 Đổi SFX...
                               </option>
-                              {availableSfx.map((s) => (
-                                <option key={s.id} value={s.id}>
-                                  {s.name}
-                                </option>
-                              ))}
+                              {availableSfx.map((s) => {
+                                const originTag = ['sfx_whoosh', 'sfx_vine_boom', 'sfx_bell_ting', 'sfx_bruh'].includes(s.id)
+                                  ? 'Mặc định'
+                                  : s.id.startsWith('imported_sfx_')
+                                  ? 'Đã nhập'
+                                  : 'Repo';
+                                return (
+                                  <option key={s.id} value={s.id}>
+                                    [{originTag}] {s.name}
+                                  </option>
+                                );
+                              })}
                             </select>
 
                             <button
@@ -1278,7 +1457,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <ShieldCheck size={18} color="var(--status-success)" />
             <span>
-              100% Asset đã xác minh quyền thương mại (CC0 / Public Domain) & Fingerprint SHA-256 nội bộ.
+              4 SFX mặc định là CC0 1.0 (Public Domain); các âm thanh từ repo hoặc tự nhập được gắn nhãn "Chưa xác nhận" bản quyền.
             </span>
           </div>
           <span style={{ color: 'var(--status-success)', fontWeight: 700 }}>
@@ -1299,8 +1478,15 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
         {/* SFX Persistent Library Management Modal */}
         <SfxLibraryModal
           isOpen={showLibraryModal}
-          onClose={() => setShowLibraryModal(false)}
-          onAssetChanged={handleRefreshSfxAssets}
+          onClose={() => {
+            setShowLibraryModal(false);
+            handleRefreshSfxAssets();
+            setLibraryChanged(true);
+          }}
+          onAssetChanged={() => {
+            handleRefreshSfxAssets();
+            setLibraryChanged(true);
+          }}
         />
       </div>
     </div>

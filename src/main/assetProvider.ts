@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { AssetItem, BeatType, VideoPreset, ImportedSfxMetadata, ImportResult } from './types';
+import { AssetItem, BeatType, VideoPreset, ImportedSfxMetadata, ImportResult, CatalogStats } from './types';
 import { runSpawn } from './util';
 
 export interface AssetProviderInterface {
@@ -25,6 +25,12 @@ export class LocalAssetProvider implements AssetProviderInterface {
       this.baseAssetsDir = customAssetsDir;
     } else {
       const candidates = [
+        ...(typeof process !== 'undefined' && (process as any).resourcesPath
+          ? [
+              path.join((process as any).resourcesPath, 'assets'),
+              path.join((process as any).resourcesPath, 'app.asar.unpacked', 'assets'),
+            ]
+          : []),
         path.resolve(__dirname, '../assets'),
         path.resolve(process.cwd(), 'assets'),
         path.resolve(__dirname, '../../assets'),
@@ -217,10 +223,92 @@ export class LocalAssetProvider implements AssetProviderInterface {
           ...item,
           fetchedAt: new Date().toISOString(),
           fingerprint: fullHash.substring(0, 16),
+          reviewStatus: item.reviewStatus || 'approved',
         };
         this.assetCache.set(fullItem.id, fullItem);
       }
     }
+
+    // 4. Dynamically scan sfxDir for all additional audio files (e.g. 13 MP3s in assets/sfx)
+    if (fs.existsSync(sfxDir)) {
+      const audioExts = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac']);
+      try {
+        const entries = fs.readdirSync(sfxDir);
+        for (const entry of entries) {
+          const fullPath = path.join(sfxDir, entry);
+          const ext = path.extname(entry).toLowerCase();
+          if (!audioExts.has(ext)) continue;
+
+          try {
+            const stat = fs.statSync(fullPath);
+            if (!stat.isFile() || stat.size === 0) continue;
+          } catch {
+            continue;
+          }
+
+          const sha256 = this.computeFingerprint(fullPath);
+          if (sha256 === 'unverified') continue;
+
+          // Check if already in assetCache by path or by content fingerprint
+          const alreadyCached = Array.from(this.assetCache.values()).some(
+            (a) => a.filePath === fullPath || (a.type === 'sfx' && a.fingerprint === sha256.substring(0, 16))
+          );
+          if (alreadyCached) continue;
+
+          const classification = this.classifySfx(entry, 0);
+          const shortHash = sha256.substring(0, 8);
+          const repoAsset: AssetItem = {
+            id: `sfx_repo_${shortHash}`,
+            name: classification.displayName,
+            type: 'sfx',
+            filePath: fullPath,
+            sourceUrl: `file://${fullPath}`,
+            author: 'Repo Assets Library',
+            license: 'Chưa xác nhận',
+            fetchedAt: new Date().toISOString(),
+            fingerprint: sha256.substring(0, 16),
+            tags: classification.tags || [],
+            category: classification.category,
+            confidence: classification.confidence,
+            reviewStatus: 'needs_review',
+            originalFilename: entry,
+            description: `${classification.description}`,
+          };
+
+          this.assetCache.set(repoAsset.id, repoAsset);
+        }
+      } catch (err) {
+        console.warn('Failed to dynamically scan sfxDir:', err);
+      }
+    }
+  }
+
+  /**
+   * Get catalog statistics (total SFX, default WAVs, repo MP3s, imported SFX)
+   */
+  getCatalogStats(): CatalogStats {
+    const sfxList = Array.from(this.assetCache.values()).filter((a) => a.type === 'sfx');
+    let defaultWavCount = 0;
+    let repoMp3Count = 0;
+    let importedCount = 0;
+
+    for (const a of sfxList) {
+      if (['sfx_whoosh', 'sfx_vine_boom', 'sfx_bell_ting', 'sfx_bruh'].includes(a.id)) {
+        defaultWavCount++;
+      } else if (a.id.startsWith('imported_sfx_')) {
+        importedCount++;
+      } else {
+        repoMp3Count++;
+      }
+    }
+
+    return {
+      totalSfx: sfxList.length,
+      defaultWavCount,
+      repoMp3Count,
+      importedCount,
+      failedFiles: [],
+    };
   }
 
   /**
@@ -297,10 +385,10 @@ export class LocalAssetProvider implements AssetProviderInterface {
         displayName: 'bonk_impact',
         normalizedBase: 'bonk_impact',
         category: 'impact',
-        tags: ['impact', 'comedy', 'hit'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh gõ / va chạm hài hước dạng bonk',
+        tags: ['impact', 'comedy', 'hit', 'bonk'],
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh gõ / va chạm hài hước dạng bonk [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -310,10 +398,10 @@ export class LocalAssetProvider implements AssetProviderInterface {
         displayName: 'bruh_reaction',
         normalizedBase: 'bruh_reaction',
         category: 'reaction',
-        tags: ['awkward', 'fail', 'reaction'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh biểu cảm ngượng ngùng / hụt hẫng (bruh)',
+        tags: ['awkward', 'fail', 'reaction', 'bruh'],
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh biểu cảm ngượng ngùng / hụt hẫng (bruh) [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -324,9 +412,9 @@ export class LocalAssetProvider implements AssetProviderInterface {
         normalizedBase: 'cartoon_slip',
         category: 'comedy',
         tags: ['slip', 'fall', 'comedy'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh trượt ngã hoạt hình hài hước',
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh trượt ngã hoạt hình hài hước [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -336,10 +424,10 @@ export class LocalAssetProvider implements AssetProviderInterface {
         displayName: 'connection_lost',
         normalizedBase: 'connection_lost',
         category: 'fail',
-        tags: ['disconnect', 'glitch', 'fail'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh mất kết nối / đứng hình / glitch',
+        tags: ['disconnect', 'glitch', 'fail', 'loading'],
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh mất kết nối / đứng hình / glitch [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -349,10 +437,10 @@ export class LocalAssetProvider implements AssetProviderInterface {
         displayName: 'ding_reveal',
         normalizedBase: 'ding_reveal',
         category: 'reveal',
-        tags: ['reveal', 'idea', 'success'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh chuông báo ý tưởng / bật mí thành công',
+        tags: ['reveal', 'idea', 'success', 'ding'],
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh chuông báo ý tưởng / bật mí thành công [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -363,9 +451,9 @@ export class LocalAssetProvider implements AssetProviderInterface {
         normalizedBase: 'money_cue',
         category: 'money',
         tags: ['money', 'cash', 'reward'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh liên quan tiền bạc / phần thưởng',
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh liên quan tiền bạc / phần thưởng [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -376,9 +464,9 @@ export class LocalAssetProvider implements AssetProviderInterface {
         normalizedBase: 'pop_transition',
         category: 'transition',
         tags: ['pop', 'appearance', 'transition'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh pop nhẹ khi xuất hiện hoặc chuyển cảnh',
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh pop nhẹ khi xuất hiện hoặc chuyển cảnh [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -388,10 +476,10 @@ export class LocalAssetProvider implements AssetProviderInterface {
         displayName: 'punch_impact',
         normalizedBase: 'punch_impact',
         category: 'impact',
-        tags: ['punch', 'hit', 'gaming'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh cú đấm / tác động mạnh phong cách gaming',
+        tags: ['punch', 'hit', 'gaming', 'impact'],
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh cú đấm / tác động mạnh phong cách gaming [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -401,10 +489,10 @@ export class LocalAssetProvider implements AssetProviderInterface {
         displayName: 'rizz_reaction',
         normalizedBase: 'rizz_reaction',
         category: 'reaction',
-        tags: ['flirt', 'rizz', 'comedy'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh nhạc nền tán tỉnh / rizz hài hước',
+        tags: ['flirt', 'rizz', 'comedy', 'reaction'],
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh nhạc nền tán tỉnh / rizz hài hước [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -414,10 +502,10 @@ export class LocalAssetProvider implements AssetProviderInterface {
         displayName: 'running_away',
         normalizedBase: 'running_away',
         category: 'chase',
-        tags: ['escape', 'chase', 'comedy'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh rượt đuổi / bỏ chạy vui nhộn',
+        tags: ['escape', 'chase', 'comedy', 'running'],
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh rượt đuổi / bỏ chạy vui nhộn [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -428,9 +516,9 @@ export class LocalAssetProvider implements AssetProviderInterface {
         normalizedBase: 'shocked_reaction',
         category: 'reaction',
         tags: ['surprise', 'shock', 'reaction'],
-        confidence: 0.95,
-        reviewStatus: 'approved',
-        description: 'Âm thanh thể hiện sự kinh ngạc / sốc',
+        confidence: 0.70,
+        reviewStatus: 'needs_review',
+        description: 'Âm thanh thể hiện sự kinh ngạc / sốc [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -448,7 +536,7 @@ export class LocalAssetProvider implements AssetProviderInterface {
         tags: ['voice', 'sound'],
         confidence: 0.50,
         reviewStatus: 'needs_review',
-        description: 'Âm thanh chưa rõ ngữ cảnh cụ thể, cần người dùng nghe thử và xác nhận',
+        description: 'Âm thanh chưa rõ ngữ cảnh cụ thể, cần nghe thử và xác nhận [Gợi ý từ tên file/cần duyệt]',
       };
     }
 
@@ -466,9 +554,9 @@ export class LocalAssetProvider implements AssetProviderInterface {
       normalizedBase: snake,
       category: 'other',
       tags: ['sfx', snake],
-      confidence: 0.60,
+      confidence: 0.50,
       reviewStatus: 'needs_review',
-      description: 'SFX nhập từ máy người dùng, cần người dùng duyệt',
+      description: 'SFX chưa rõ ngữ cảnh [Gợi ý từ tên file/cần duyệt]',
     };
   }
 

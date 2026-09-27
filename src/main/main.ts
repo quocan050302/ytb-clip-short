@@ -153,6 +153,21 @@ function setupIpcHandlers(): void {
     }
   );
 
+  ipcMain.handle(
+    'job:updateAssetPlan',
+    async (_, jobId: string, candidateId: string, plan: any) => {
+      return jobManager.updateCandidateAssetPlan(jobId, candidateId, plan);
+    }
+  );
+
+  ipcMain.handle('asset:getAll', async (_, type?: 'meme' | 'sfx' | 'music') => {
+    return await jobManager.getAutoAssetPlanner().getAssetProvider().getAllAssets(type);
+  });
+
+  ipcMain.handle('asset:getTrends', async () => {
+    return jobManager.getAutoAssetPlanner().getTrendCatalog().getTrends();
+  });
+
   ipcMain.handle('job:renderAll', async (_, jobId: string) => {
     return await jobManager.renderAllCandidates(jobId);
   });

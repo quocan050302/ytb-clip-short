@@ -21,7 +21,7 @@ describe('AutoClip Studio End-to-End Pipeline', () => {
     captions: true,
     bgm: true,
     sfx: true,
-    broll: false,
+    broll: true,
     mode: 'local',
   };
 
@@ -89,6 +89,14 @@ Hãy áp dụng ngay để tạo ra những video shorts triệu view nhé.
     expect(firstCand.scoreBreakdown.hook).toBeDefined();
     expect(firstCand.reason).toBeDefined();
 
+    // Auto Asset Plan assertions
+    expect(firstCand.assetPlan).toBeDefined();
+    expect(firstCand.assetPlan?.musicTrack).toBeDefined();
+    expect(firstCand.assetPlan?.beats.length).toBeGreaterThan(0);
+    expect(firstCand.assetPlan?.duckingSettings.normalVolume).toBeGreaterThan(
+      firstCand.assetPlan!.duckingSettings.duckedVolume
+    );
+
     // 3. Render candidates
     const renderedJob = await jobManager.renderAllCandidates(job.id);
     expect(renderedJob.status).toBe('completed');
@@ -115,6 +123,10 @@ Hãy áp dụng ngay để tạo ra những video shorts triệu view nhé.
     // 9:16 vertical reframe check
     expect(videoStream.width).toBe(1080);
     expect(videoStream.height).toBe(1920);
+
+    // Audio stream check (Speech + Ducked BGM + Beat SFX mixed)
+    const audioStream = probeData.streams?.find((s: any) => s.codec_name === 'aac');
+    expect(audioStream).toBeDefined();
 
     // 5. Test persistence: reload and verify state
     const restoredManager = new JobManager(tempBaseDir);

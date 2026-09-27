@@ -35,6 +35,47 @@ export interface ScoreBreakdown {
   payoff: number;   // Strong ending or punchline conclusion (0-100)
 }
 
+export type BeatType = 'hook' | 'reveal' | 'surprise' | 'fail' | 'punchline' | 'pause';
+
+export interface AssetItem {
+  id: string;
+  name: string;
+  type: 'meme' | 'sfx' | 'music';
+  filePath: string;
+  sourceUrl: string;
+  author?: string;
+  license: string;
+  fetchedAt: string;
+  fingerprint: string;
+  mood?: string;
+  tags: string[];
+}
+
+export interface BeatEvent {
+  id: string;
+  beatType: BeatType;
+  timestamp: number;    // seconds relative to clip start (e.g. 3.5s)
+  duration: number;     // overlay display duration in seconds (e.g. 1.5s)
+  sfx: AssetItem;       // paired SFX (fires at timestamp)
+  meme: AssetItem;      // paired Meme (shown from timestamp to timestamp + duration)
+  confidence: number;   // 0.0 - 1.0
+  reason: string;
+}
+
+export interface DuckingSettings {
+  normalVolume: number;
+  duckedVolume: number;
+  fadeInDuration: number;
+  fadeOutDuration: number;
+}
+
+export interface ClipAssetPlan {
+  clipId: string;
+  musicTrack: AssetItem | null;
+  beats: BeatEvent[];
+  duckingSettings: DuckingSettings;
+}
+
 export interface ClipCandidate {
   id: string;
   title: string;
@@ -47,6 +88,7 @@ export interface ClipCandidate {
   transcriptExcerpt: string;
   thumbnailPath?: string;
   selected: boolean;
+  assetPlan?: ClipAssetPlan;
 }
 
 export type ClipRenderStatus = 
@@ -69,6 +111,7 @@ export interface RenderedClip {
   error?: string;
   duration?: number;
   updatedAt: string;
+  assetPlan?: ClipAssetPlan;
 }
 
 export interface LogEntry {

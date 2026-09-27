@@ -65,6 +65,8 @@ export const CostPreflightModal: React.FC<CostPreflightModalProps> = ({
               <li>Tỷ lệ khung hình: <strong>{settings.aspectRatio}</strong></li>
               <li>Phong cách preset: <strong>{settings.preset === 'reaction' ? 'Reaction / Streamer' : 'Documentary / Kể chuyện'}</strong></li>
               <li>Tự động căn chỉnh & gắn phụ đề: <strong>{settings.captions ? 'Bật' : 'Tắt'}</strong></li>
+              <li>Nhạc nền (BGM Auto-Ducking): <strong>{settings.bgm ? 'Bật (Tự động giảm âm lượng khi có giọng nói, CC0 bản quyền)' : 'Tắt'}</strong></li>
+              <li>Hiệu ứng Meme & SFX Beat: <strong>{settings.broll || settings.sfx ? 'Bật (Đồng bộ chính xác mốc Hook, Surprise, Reveal, Fail, Punchline)' : 'Tắt'}</strong></li>
             </ul>
           </div>
 

@@ -38,6 +38,10 @@ Thumbs.db
 *.png
 *.ass
 
+# Whitelist built-in royalty-free assets library
+!assets/
+!assets/**
+
 # Environment variables & editor
 .env
 .env.local

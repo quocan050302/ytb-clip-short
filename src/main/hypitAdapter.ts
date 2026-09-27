@@ -7,6 +7,7 @@ import {
   JobSettings,
   ClipCandidate,
   TranscriptSegment,
+  ClipAssetPlan,
 } from './types';
 
 export class HypitAdapter {
@@ -266,11 +267,9 @@ export class HypitAdapter {
     const hypitPath = await this.getHypitPath();
     const generatedPaths: string[] = [];
 
-    // Format timestamps as comma-separated seconds
     const atArg = timestamps.map((t) => Math.max(0, Math.round(t))).join(',');
 
     try {
-      // Use unique subfolder for hypit media frames (it refuses to overwrite existing dirs)
       const framesDir = path.join(outputDir, `frames_${Date.now()}`);
       const { promise } = runSpawn(hypitPath, [
         'media', 'frames', videoPath,
@@ -327,7 +326,6 @@ export class HypitAdapter {
   ): Promise<string> {
     const hypitPath = await this.getHypitPath();
 
-    // Remove old target if exists because hypit refuses to overwrite
     if (fs.existsSync(outputPath)) {
       fs.unlinkSync(outputPath);
     }
@@ -372,6 +370,7 @@ export class HypitAdapter {
 
   /**
    * Generate durable Hypit project files (.svml, .svrun, .svs, hypit.runtime.json)
+   * with full multi-track layout: A-roll video, overlay meme items, and audio presentation.
    */
   generateProject(
     projectDir: string,
@@ -428,15 +427,14 @@ export class HypitAdapter {
     fit: cover; 
     clip: frame; 
   }
-  media.overlay_card { 
-    stack-order: 30; 
+  media.meme_overlay { 
+    stack-order: 50; 
     fit: contain; 
     clip: rounded; 
-    radius: ${isReaction ? 16 : 8}; 
-    padding: "16 24"; 
-    frame-paint: ${isReaction ? '#FFDF00' : '#1E2530EE'}; 
-    border-width: 2; 
-    border-color: ${isReaction ? '#000000' : '#334155'}; 
+    radius: 16; 
+    padding: "8"; 
+    frame-paint: #00000088; 
+    shadows: "0 10 25 0 #00000088";
   }
 </sheet>
 `;
@@ -444,8 +442,21 @@ export class HypitAdapter {
     fs.writeFileSync(svsPath, svsContent, 'utf8');
 
     // 3. Create clip.svml authoring file
-    // Relative path to cut video from projectDir
     const relVideoPath = path.relative(projectDir, cutVideoPath).replace(/\\/g, '/');
+    const assetPlan = candidate.assetPlan;
+
+    // Build meme image imports & items if present in assetPlan
+    let memeImports = '';
+    let memeItems = '';
+    if (settings.broll && assetPlan?.beats) {
+      assetPlan.beats.forEach((beat, idx) => {
+        if (beat.meme && fs.existsSync(beat.meme.filePath)) {
+          const relMemePath = path.relative(projectDir, beat.meme.filePath).replace(/\\/g, '/');
+          memeImports += `  <media:Image id="meme_img_${idx}" src="${relMemePath}"/>\n`;
+          memeItems += `    <media-track:Item id="meme_item_${idx}" image={meme_img_${idx}} frame={meme-frame} during="${beat.timestamp}s..${(beat.timestamp + beat.duration).toFixed(1)}s" appearance={recipes.media.meme_overlay}/>\n`;
+        }
+      });
+    }
 
     const svmlContent = `<?svml using="@hypit/markup@1"?>
 <svml>
@@ -468,11 +479,12 @@ export class HypitAdapter {
   <space:Canvas id="viewport" width="${canvasWidth}" height="${canvasHeight}"/>
   <program:Clock id="clock" frame-rate="30"/>
   <space:Frame id="main-frame" within={viewport} left="0%" top="0%" right="100%" bottom="100%"/>
+  <space:Frame id="meme-frame" within={viewport} left="25%" top="12%" right="75%" bottom="36%"/>
 
   <!-- Source Video Segment -->
   <media:Video id="source-clip" src="${relVideoPath}"/>
   <pipeline:Normalize id="clip-media" source={source-clip} clock={clock} video="primary-moving" audio="primary-sync" span-authority="video"/>
-  
+${memeImports}
   <whisperx:SemanticTake id="clip-take" narrative={story} segment={story.segment.scene} media={clip-media.media}/>
   
   <time:Timeline id="timeline" clock={clock} end="${durationSec}s">
@@ -481,7 +493,7 @@ export class HypitAdapter {
 
   <media-track:Track id="visual-track" timeline={timeline.timeline} canvas={viewport}>
     <media-track:Item id="video-item" media={clip-media.media} frame={main-frame} during="program" appearance={recipes.media.video_layer}/>
-  </media-track:Track>
+${memeItems}  </media-track:Track>
 
   <film:Film id="main-film" canvas={viewport} timeline={timeline.timeline} appearance={recipes.film.canvas}>
     <film:Track source={visual-track.visual}/>
@@ -507,8 +519,8 @@ export class HypitAdapter {
   }
 
   /**
-   * Render clip by running Hypit build & get, with automatic fallback
-   * to high-fidelity FFmpeg crop/reframe/caption pipeline when needed.
+   * Render clip by running Hypit build & get, plus rich audio mixing
+   * (speech + ducked BGM + beat-synchronized SFX) and meme visual overlays.
    */
   async renderClip(
     clipId: string,
@@ -527,7 +539,6 @@ export class HypitAdapter {
     onProgress(5, 'Chuẩn bị dữ liệu và cắt A-roll segment');
     onLog(`[${clipId}] Bắt đầu quy trình dựng clip: ${candidate.title}`);
 
-    // Ensure output directory exists
     const outDir = path.dirname(outputPath);
     if (!fs.existsSync(outDir)) {
       fs.mkdirSync(outDir, { recursive: true });
@@ -586,24 +597,25 @@ export class HypitAdapter {
             const data = JSON.parse(buildRes.stdout.trim());
             hypitBuildId = data.build?.id;
             if (hypitBuildId && data.build?.result?.state === 'complete') {
-              onProgress(80, 'Export video từ Hypit Build Result');
+              onProgress(70, 'Export video từ Hypit Build Result');
               onLog(`[${clipId}] Xuất output với hypit get ${hypitBuildId}...`);
 
-              if (fs.existsSync(outputPath)) {
-                fs.unlinkSync(outputPath);
+              const hypitOutFile = path.join(projectDir, 'hypit_base.mp4');
+              if (fs.existsSync(hypitOutFile)) {
+                fs.unlinkSync(hypitOutFile);
               }
 
               const getRes = await runSpawn(hypitPath, [
                 'get', hypitBuildId,
                 '--output', 'final.video',
-                '--to', outputPath,
+                '--to', hypitOutFile,
                 '--workspace', projectDir,
                 '--json'
               ]).promise;
 
-              if (getRes.code === 0 && fs.existsSync(outputPath)) {
+              if (getRes.code === 0 && fs.existsSync(hypitOutFile)) {
                 hypitSuccess = true;
-                onLog(`[${clipId}] Hypit build thành công tuyệt đối!`);
+                onLog(`[${clipId}] Hypit build thành công! Tiến hành hòa âm & overlay beat...`);
               }
             }
           } catch (parseErr) {
@@ -615,75 +627,182 @@ export class HypitAdapter {
       onLog(`[Hypit notice] Hypit run step error: ${err.message}`);
     }
 
-    // 4. Fallback / Post-processing Pipeline:
-    // If Hypit encountered an environmental missing package or if video styling
-    // (exact 9:16 safe-crop, burned-in styled captions, audio ducking) is required,
-    // apply local FFmpeg rendering pipeline to guarantee 100% playable output MP4!
-    if (!hypitSuccess || settings.captions || settings.aspectRatio === '9:16') {
-      onProgress(65, 'Áp dụng bộ lọc dựng chuẩn (Reframe 9:16, Subtitle, Audio ducking)');
-      onLog(`[Renderer] Tinh chỉnh frame và đóng gói MP4 hoàn chỉnh...`);
+    // 4. AUTO ASSET COMPOSITION (Meme overlay + SFX at beat timestamp + BGM ducking)
+    onProgress(75, 'Hòa âm đa tầng (BGM Ducking, SFX) và chèn Meme vào Beat');
+    onLog(`[AutoAsset] Đang áp dụng kế hoạch Asset Plan cho ${clipId}...`);
 
-      const tempRenderPath = path.join(projectDir, `render_processed_${clipId}.mp4`);
-      if (fs.existsSync(tempRenderPath)) {
-        fs.unlinkSync(tempRenderPath);
+    const tempRenderPath = path.join(projectDir, `final_mixed_${clipId}.mp4`);
+    if (fs.existsSync(tempRenderPath)) {
+      fs.unlinkSync(tempRenderPath);
+    }
+
+    const inputVideo = hypitSuccess && fs.existsSync(path.join(projectDir, 'hypit_base.mp4'))
+      ? path.join(projectDir, 'hypit_base.mp4')
+      : cutSubclipPath;
+
+    const assetPlan = candidate.assetPlan;
+    const clipDuration = candidate.duration;
+
+    // Prepare inputs array for ffmpeg
+    const ffmpegArgs: string[] = ['-i', inputVideo];
+    let nextInputIdx = 1;
+
+    // Collect meme inputs
+    const memeInputsMap: Array<{ inputIdx: number; beat: any }> = [];
+    if (settings.broll && assetPlan?.beats) {
+      for (const beat of assetPlan.beats) {
+        if (beat.meme && fs.existsSync(beat.meme.filePath)) {
+          ffmpegArgs.push('-i', beat.meme.filePath);
+          memeInputsMap.push({ inputIdx: nextInputIdx++, beat });
+        }
+      }
+    }
+
+    // Collect BGM input
+    let bgmInputIdx = -1;
+    if (settings.bgm && assetPlan?.musicTrack && fs.existsSync(assetPlan.musicTrack.filePath)) {
+      ffmpegArgs.push('-stream_loop', '-1', '-i', assetPlan.musicTrack.filePath);
+      bgmInputIdx = nextInputIdx++;
+    }
+
+    // Collect SFX inputs
+    const sfxInputsMap: Array<{ inputIdx: number; beat: any }> = [];
+    if (settings.sfx && assetPlan?.beats) {
+      for (const beat of assetPlan.beats) {
+        if (beat.sfx && fs.existsSync(beat.sfx.filePath)) {
+          ffmpegArgs.push('-i', beat.sfx.filePath);
+          sfxInputsMap.push({ inputIdx: nextInputIdx++, beat });
+        }
+      }
+    }
+
+    // Construct Video Filters
+    const vfChains: string[] = [];
+    let currentVLabel = '0:v';
+
+    if (settings.aspectRatio === '9:16') {
+      vfChains.push(`[${currentVLabel}]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v_reframe]`);
+      currentVLabel = 'v_reframe';
+    } else {
+      vfChains.push(`[${currentVLabel}]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[v_reframe]`);
+      currentVLabel = 'v_reframe';
+    }
+
+    // Burn-in styled subtitles if enabled
+    if (settings.captions && relevantSegments.length > 0) {
+      const assPath = path.join(projectDir, `captions_${clipId}.ass`);
+      generateAssSubtitles(assPath, relevantSegments, candidate.start, settings.preset);
+      vfChains.push(`[${currentVLabel}]subtitles=${assPath.replace(/:/g, '\\:')}[v_sub]`);
+      currentVLabel = 'v_sub';
+    }
+
+    // Overlay Memes at exact beat timestamps
+    memeInputsMap.forEach(({ inputIdx, beat }, i) => {
+      const outLabel = `v_meme_${i}`;
+      const startT = Math.max(0, beat.timestamp);
+      const endT = Math.min(clipDuration, startT + beat.duration);
+      // Center top position with smooth sizing
+      vfChains.push(
+        `[${inputIdx}:v]scale=360:360:force_original_aspect_ratio=decrease[meme_scale_${i}];` +
+        `[${currentVLabel}][meme_scale_${i}]overlay=x=(W-w)/2:y=H*0.14:enable='between(t,${startT.toFixed(2)},${endT.toFixed(2)})'[${outLabel}]`
+      );
+      currentVLabel = outLabel;
+    });
+
+    // Construct Audio Filters (Speech + Ducked BGM + SFX)
+    const afChains: string[] = [];
+    const mixLabels: string[] = ['[0:a]'];
+
+    // Process BGM with ducking
+    if (bgmInputIdx !== -1 && assetPlan) {
+      const normalVol = assetPlan.duckingSettings.normalVolume;
+      const duckedVol = assetPlan.duckingSettings.duckedVolume;
+      
+      // Calculate speech intervals relative to clip start
+      const speechIntervals = relevantSegments
+        .map((s) => ({
+          st: Math.max(0, s.start - candidate.start),
+          et: Math.min(clipDuration, s.end - candidate.start),
+        }))
+        .filter((iv) => iv.et > iv.st);
+
+      // Build ducking condition expression
+      let duckExpr = `${normalVol}`;
+      if (speechIntervals.length > 0) {
+        const betweenConditions = speechIntervals
+          .map((iv) => `between(t,${iv.st.toFixed(2)},${iv.et.toFixed(2)})`)
+          .join('+');
+        duckExpr = `if(${betweenConditions},${duckedVol},${normalVol})`;
       }
 
-      // Input video to process (either Hypit rendered or cut subclip)
-      const inputToProcess = hypitSuccess && fs.existsSync(outputPath) ? outputPath : cutSubclipPath;
+      const fadeOutStart = Math.max(0, clipDuration - assetPlan.duckingSettings.fadeOutDuration);
+      afChains.push(
+        `[${bgmInputIdx}:a]volume=eval=frame:volume='${duckExpr}',` +
+        `afade=t=in:st=0:d=${assetPlan.duckingSettings.fadeInDuration},` +
+        `afade=t=out:st=${fadeOutStart.toFixed(2)}:d=${assetPlan.duckingSettings.fadeOutDuration}[a_bgm]`
+      );
+      mixLabels.push('[a_bgm]');
+    }
 
-      // Build video filters for aspect ratio reframe
-      const vfFilters: string[] = [];
-      if (settings.aspectRatio === '9:16') {
-        // Safe center crop to 9:16 (1080x1920) with smooth scaling
-        vfFilters.push('scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920');
-      } else {
-        vfFilters.push('scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2');
+    // Process SFX at exact beat timestamps
+    sfxInputsMap.forEach(({ inputIdx, beat }, i) => {
+      const label = `a_sfx_${i}`;
+      const delayMs = Math.max(0, Math.round(beat.timestamp * 1000));
+      afChains.push(
+        `[${inputIdx}:a]volume=0.85,adelay=${delayMs}|${delayMs}[${label}]`
+      );
+      mixLabels.push(`[${label}]`);
+    });
+
+    // Mix all audio tracks together
+    let filterComplex = '';
+    if (vfChains.length > 0) {
+      filterComplex += vfChains.join(';') + ';';
+    }
+
+    let finalALabel = '0:a';
+    if (mixLabels.length > 1) {
+      filterComplex += afChains.join(';') + ';';
+      filterComplex += `${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:dropout_transition=2[a_out]`;
+      finalALabel = 'a_out';
+    }
+
+    ffmpegArgs.push(
+      '-filter_complex', filterComplex,
+      '-map', `[${currentVLabel}]`,
+      '-map', `[${finalALabel}]`,
+      '-t', clipDuration.toFixed(2),
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '19',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      tempRenderPath,
+      '-y'
+    );
+
+    const renderSpawn = runSpawn(ffmpegPath, ffmpegArgs, {
+      onStderr: (data) => {
+        if (data.includes('time=')) {
+          onProgress(88, 'Đang xuất MP4 hoàn thiện...');
+        }
       }
+    });
 
-      // Add captions if enabled and transcript exists
-      if (settings.captions && relevantSegments.length > 0) {
-        // Generate ASS subtitle file for rich styled captions
-        const assPath = path.join(projectDir, `captions_${clipId}.ass`);
-        generateAssSubtitles(assPath, relevantSegments, candidate.start, settings.preset);
-        vfFilters.push(`subtitles=${assPath.replace(/:/g, '\\:')}`);
+    this.activeRuns.set(clipId, renderSpawn.cancel);
+    const renderRes = await renderSpawn.promise;
+    this.activeRuns.delete(clipId);
+
+    if (renderRes.code === 0 && fs.existsSync(tempRenderPath)) {
+      if (fs.existsSync(outputPath)) {
+        fs.unlinkSync(outputPath);
       }
-
-      const ffmpegArgs = [
-        '-i', inputToProcess,
-        '-vf', vfFilters.join(','),
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
-        '-crf', '19',
-        '-c:a', 'aac',
-        '-b:a', '192k',
-        tempRenderPath,
-        '-y'
-      ];
-
-      const renderSpawn = runSpawn(ffmpegPath, ffmpegArgs, {
-        onStderr: (data) => {
-          if (data.includes('time=')) {
-            onProgress(85, 'Đang ghi dữ liệu video MP4...');
-          }
-        }
-      });
-
-      this.activeRuns.set(clipId, renderSpawn.cancel);
-      const renderRes = await renderSpawn.promise;
-      this.activeRuns.delete(clipId);
-
-      if (renderRes.code === 0 && fs.existsSync(tempRenderPath)) {
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
-        }
-        fs.renameSync(tempRenderPath, outputPath);
-        onLog(`[${clipId}] Dựng clip hoàn tất: ${outputPath}`);
-      } else {
-        // If ASS subtitles filter failed (e.g. libass missing in some builds), fallback to direct cut
-        if (!fs.existsSync(outputPath) && fs.existsSync(cutSubclipPath)) {
-          fs.copyFileSync(cutSubclipPath, outputPath);
-          onLog(`[${clipId}] Đã xuất clip video sạch.`);
-        }
+      fs.renameSync(tempRenderPath, outputPath);
+      onLog(`[${clipId}] Xuất clip hoàn chỉnh (A-roll + BGM ducked + SFX + Meme): ${outputPath}`);
+    } else {
+      onLog(`[${clipId}] Render filter gặp lỗi, dùng phương án dự phòng... ${renderRes.stderr}`);
+      if (!fs.existsSync(outputPath) && fs.existsSync(cutSubclipPath)) {
+        fs.copyFileSync(cutSubclipPath, outputPath);
       }
     }
 
@@ -713,8 +832,8 @@ function generateAssSubtitles(
   preset: string
 ): void {
   const isReaction = preset === 'reaction';
-  const primaryColor = isReaction ? '&H0000FFFF' : '&H00FFFFFF'; // Yellow vs Clean White
-  const outlineColor = '&H00000000'; // Black outline
+  const primaryColor = isReaction ? '&H0000FFFF' : '&H00FFFFFF';
+  const outlineColor = '&H00000000';
 
   const assHeader = `[Script Info]
 ScriptType: v4.00+

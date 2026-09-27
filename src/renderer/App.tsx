@@ -8,7 +8,9 @@ import { RenderProgress } from './components/RenderProgress';
 import { OutputGallery } from './components/OutputGallery';
 import { CostPreflightModal } from './components/CostPreflightModal';
 import { JobsDrawer } from './components/JobsDrawer';
+import { AssetPlanModal } from './components/AssetPlanModal';
 import {
+  ClipAssetPlan,
   ClipCandidate,
   EnvironmentStatus,
   JobMetadata,
@@ -20,7 +22,7 @@ export const App: React.FC = () => {
   // System environment status
   const [envStatus, setEnvStatus] = useState<EnvironmentStatus | null>(null);
 
-  // Default settings
+  // Default settings (Auto Asset Mode: captions, BGM ducking, SFX, and meme overlays enabled by default)
   const [settings, setSettings] = useState<JobSettings>({
     targetClipCount: 5,
     clipDurationMin: 30,
@@ -30,7 +32,7 @@ export const App: React.FC = () => {
     captions: true,
     bgm: true,
     sfx: true,
-    broll: false,
+    broll: true,
     mode: 'local',
   });
 
@@ -44,6 +46,7 @@ export const App: React.FC = () => {
   const [isRendering, setIsRendering] = useState(false);
   const [showPreflight, setShowPreflight] = useState(false);
   const [showJobsDrawer, setShowJobsDrawer] = useState(false);
+  const [candidateForAssetPlan, setCandidateForAssetPlan] = useState<ClipCandidate | null>(null);
 
   // Load system environment and existing jobs on mount
   useEffect(() => {
@@ -157,6 +160,20 @@ export const App: React.FC = () => {
     const newCandidates = [...currentJob.candidates, cand];
     const updatedJob = await window.electronAPI.updateCandidates(currentJob.id, newCandidates);
     setCurrentJob(updatedJob);
+  };
+
+  const handleSaveAssetPlan = async (updatedPlan: ClipAssetPlan) => {
+    if (!currentJob || !candidateForAssetPlan) return;
+    try {
+      const updatedJob = await window.electronAPI.updateCandidateAssetPlan(
+        currentJob.id,
+        candidateForAssetPlan.id,
+        updatedPlan
+      );
+      setCurrentJob(updatedJob);
+    } catch (err) {
+      console.error('Failed to update asset plan:', err);
+    }
   };
 
   // Render pipeline
@@ -330,6 +347,7 @@ export const App: React.FC = () => {
               onAddManual={handleAddManualCandidate}
               onStartRender={() => setShowPreflight(true)}
               isRendering={isRendering}
+              onEditAssetPlan={(cand) => setCandidateForAssetPlan(cand)}
             />
           )}
         </div>
@@ -364,6 +382,15 @@ export const App: React.FC = () => {
           candidatesToRender={candidatesToRender}
           onConfirm={handleConfirmRender}
           onCancel={() => setShowPreflight(false)}
+        />
+      )}
+
+      {/* Asset Plan Inspection & Tweaking Modal */}
+      {candidateForAssetPlan && (
+        <AssetPlanModal
+          candidate={candidateForAssetPlan}
+          onSave={handleSaveAssetPlan}
+          onClose={() => setCandidateForAssetPlan(null)}
         />
       )}
 

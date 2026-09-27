@@ -13,6 +13,7 @@ interface CandidatesGridProps {
   onAddManual: (candidate: ClipCandidate) => void;
   onStartRender: () => void;
   isRendering: boolean;
+  onEditAssetPlan?: (candidate: ClipCandidate) => void;
 }
 
 export const CandidatesGrid: React.FC<CandidatesGridProps> = ({
@@ -24,6 +25,7 @@ export const CandidatesGrid: React.FC<CandidatesGridProps> = ({
   onAddManual,
   onStartRender,
   isRendering,
+  onEditAssetPlan,
 }) => {
   const [previewingCandidate, setPreviewingCandidate] = useState<ClipCandidate | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -125,6 +127,7 @@ export const CandidatesGrid: React.FC<CandidatesGridProps> = ({
             onMoveUp={handleMoveUp}
             onMoveDown={handleMoveDown}
             onPreview={(c) => setPreviewingCandidate(c)}
+            onEditAssetPlan={onEditAssetPlan}
           />
         ))}
 

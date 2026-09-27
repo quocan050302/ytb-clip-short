@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
+  ClipAssetPlan,
   ClipCandidate,
   JobMetadata,
   JobSettings,
@@ -12,12 +13,14 @@ import {
 } from './types';
 import { HypitAdapter } from './hypitAdapter';
 import { VideoAnalyzer } from './videoAnalyzer';
+import { AutoAssetPlanner } from './autoAssetPlanner';
 
 export class JobManager {
   private baseJobsDir: string;
   private jobs: Map<string, JobMetadata> = new Map();
   private hypitAdapter: HypitAdapter;
   private videoAnalyzer: VideoAnalyzer;
+  private autoAssetPlanner: AutoAssetPlanner;
   private onJobUpdatedCallback?: (job: JobMetadata) => void;
 
   constructor(customJobsDir?: string) {
@@ -31,7 +34,12 @@ export class JobManager {
 
     this.hypitAdapter = new HypitAdapter();
     this.videoAnalyzer = new VideoAnalyzer();
+    this.autoAssetPlanner = new AutoAssetPlanner();
     this.loadAllJobs();
+  }
+
+  getAutoAssetPlanner(): AutoAssetPlanner {
+    return this.autoAssetPlanner;
   }
 
   setJobUpdatedCallback(cb: (job: JobMetadata) => void): void {
@@ -213,14 +221,23 @@ export class JobManager {
 
       // 3. Generate candidate clips
       this.addLog(jobId, 'info', `Bắt đầu tính điểm Hook, Pacing, Payoff và tạo các đoạn clip đề xuất (${job.settings.targetClipCount} clips)...`);
-      const candidates = this.videoAnalyzer.generateCandidates(
+      let candidates = this.videoAnalyzer.generateCandidates(
         segments,
         silences,
         job.videoInfo.duration,
         job.settings
       );
 
-      // 4. Extract thumbnails for each candidate
+      // 4. Auto Asset Planning for all candidates (Hook/Surprise/Reveal/Fail/Punchline + Meme & SFX sync + Ducking BGM)
+      this.addLog(jobId, 'info', 'Khởi chạy Auto Asset Planner: quét nhịp (hook/surprise/reveal/fail/punchline) & tự động đồng bộ Meme + SFX + BGM Ducking...');
+      candidates = this.autoAssetPlanner.planAll(
+        candidates,
+        job.settings,
+        segments,
+        silences
+      );
+
+      // 5. Extract thumbnails for each candidate
       this.addLog(jobId, 'info', 'Trích xuất thumbnail khung hình cho các đoạn đề xuất...');
       const timestamps = candidates.map((c) => c.start + Math.min(2, c.duration / 2));
       const thumbsDir = path.join(job.jobDir, 'candidates', 'thumbnails');
@@ -244,7 +261,7 @@ export class JobManager {
       );
 
       job.status = 'candidates_ready';
-      this.addLog(jobId, 'info', `Đã tìm thấy ${candidates.length} đoạn shorts tiềm năng! Sẵn sàng duyệt.`);
+      this.addLog(jobId, 'info', `Đã tìm thấy ${candidates.length} đoạn shorts tiềm năng và hoàn tất Auto Asset Plan! Sẵn sàng duyệt.`);
       this.notifyUpdate(job);
       return job;
     } catch (err: any) {
@@ -262,14 +279,49 @@ export class JobManager {
     const job = this.jobs.get(jobId);
     if (!job) throw new Error(`Job ${jobId} not found`);
 
-    job.candidates = candidates;
+    const enriched = candidates.map((cand) => {
+      if (!cand.assetPlan) {
+        return {
+          ...cand,
+          assetPlan: this.autoAssetPlanner.planForClip(cand, job.settings, job.transcript, []),
+        };
+      }
+      return cand;
+    });
+
+    job.candidates = enriched;
     fs.writeFileSync(
       path.join(job.jobDir, 'candidates', 'candidates.json'),
-      JSON.stringify(candidates, null, 2),
+      JSON.stringify(enriched, null, 2),
       'utf8'
     );
-    this.addLog(jobId, 'info', `Cập nhật danh sách candidate (${candidates.length} clips)`);
+    this.addLog(jobId, 'info', `Cập nhật danh sách candidate (${enriched.length} clips)`);
     this.notifyUpdate(job);
+    return job;
+  }
+
+  /**
+   * Update asset plan for a single candidate
+   */
+  updateCandidateAssetPlan(
+    jobId: string,
+    candidateId: string,
+    assetPlan: ClipAssetPlan
+  ): JobMetadata {
+    const job = this.jobs.get(jobId);
+    if (!job) throw new Error(`Job ${jobId} not found`);
+
+    const cand = job.candidates.find((c) => c.id === candidateId);
+    if (cand) {
+      cand.assetPlan = assetPlan;
+      fs.writeFileSync(
+        path.join(job.jobDir, 'candidates', 'candidates.json'),
+        JSON.stringify(job.candidates, null, 2),
+        'utf8'
+      );
+      this.addLog(jobId, 'info', `Cập nhật Kế hoạch Asset (Meme/SFX/BGM) cho clip "${cand.title}"`, candidateId);
+      this.notifyUpdate(job);
+    }
     return job;
   }
 

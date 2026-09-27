@@ -12,6 +12,7 @@ interface CandidateCardProps {
   onMoveUp: (index: number) => void;
   onMoveDown: (index: number) => void;
   onPreview: (candidate: ClipCandidate) => void;
+  onEditAssetPlan?: (candidate: ClipCandidate) => void;
 }
 
 export const CandidateCard: React.FC<CandidateCardProps> = ({
@@ -23,6 +24,7 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
   onMoveUp,
   onMoveDown,
   onPreview,
+  onEditAssetPlan,
 }) => {
   const [isEditingTimes, setIsEditingTimes] = useState(false);
   const [startInput, setStartInput] = useState(candidate.start.toString());
@@ -256,6 +258,77 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({
           <div style={{ fontSize: '0.76rem', color: 'var(--text-dim)', marginTop: 2 }}>
             <strong>Đánh giá biên tập:</strong> {candidate.reason}
           </div>
+
+          {/* Auto Asset Plan Summary Bar */}
+          {candidate.assetPlan && (
+            <div
+              style={{
+                marginTop: 6,
+                padding: '8px 12px',
+                background: 'rgba(99, 102, 241, 0.08)',
+                border: '1px solid rgba(99, 102, 241, 0.25)',
+                borderRadius: 'var(--radius-sm)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 8,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: '0.78rem' }}>
+                <span style={{ fontWeight: 600, color: 'var(--accent-primary)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <Sparkles size={13} /> Auto Asset:
+                </span>
+
+                {candidate.assetPlan.musicTrack && (
+                  <span
+                    style={{
+                      background: 'rgba(56, 189, 248, 0.15)',
+                      color: '#38BDF8',
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      fontSize: '0.72rem',
+                    }}
+                    title={`Nhạc nền: ${candidate.assetPlan.musicTrack.name} (Auto Ducked)`}
+                  >
+                    🎵 {candidate.assetPlan.musicTrack.name}
+                  </span>
+                )}
+
+                {candidate.assetPlan.beats.map((b) => (
+                  <span
+                    key={b.id}
+                    style={{
+                      background: 'rgba(255, 255, 255, 0.07)',
+                      color: '#E2E8F0',
+                      padding: '2px 6px',
+                      borderRadius: 4,
+                      fontSize: '0.72rem',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                    title={`${b.reason} | Meme: ${b.meme?.name} + SFX: ${b.sfx?.name}`}
+                  >
+                    {b.beatType === 'hook' && '🔥 Hook'}
+                    {b.beatType === 'surprise' && '💥 Surprise'}
+                    {b.beatType === 'reveal' && '💡 Reveal'}
+                    {b.beatType === 'fail' && '🗿 Bruh'}
+                    {b.beatType === 'punchline' && '🕶️ Punch'}
+                    {b.beatType === 'pause' && '⏱️ Pause'} @{b.timestamp.toFixed(1)}s
+                  </span>
+                ))}
+              </div>
+
+              {onEditAssetPlan && (
+                <button
+                  className="btn btn-secondary btn-sm"
+                  style={{ padding: '3px 8px', fontSize: '0.72rem' }}
+                  onClick={() => onEditAssetPlan(candidate)}
+                >
+                  <Sparkles size={11} /> Xem & Sửa Asset Plan
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
+  AudioEventPlan,
   ClipAssetPlan,
   ClipCandidate,
   ClipEditPlan,
@@ -11,9 +12,11 @@ import {
   JobSettings,
   LogEntry,
   MomentEvent,
+  PlannedSfxEvent,
   RenderedClip,
   TranscriptSegment,
   VideoInfo,
+  VisualOverlayPlan,
 } from './types';
 import { HypitAdapter } from './hypitAdapter';
 import { VideoAnalyzer } from './videoAnalyzer';
@@ -29,6 +32,41 @@ import {
   suggestShortsCopy,
   writeShortsMetadata,
 } from './shortsPackage';
+
+import {
+  migrateAssetPlan,
+  buildAudioEventsFromAssetPlan,
+  buildVisualOverlaysFromAssetPlan,
+} from './autoAssetPlanner';
+
+export {
+  migrateAssetPlan,
+  buildAudioEventsFromAssetPlan,
+  buildVisualOverlaysFromAssetPlan,
+};
+
+/**
+ * Synchronize candidate.assetPlan into candidate.editPlan so renderer always executes the latest plan.
+ */
+export function syncAssetPlanToEditPlan(candidate: ClipCandidate): void {
+  if (!candidate.assetPlan) return;
+  candidate.assetPlan = migrateAssetPlan(candidate.assetPlan, candidate.duration);
+  if (candidate.editPlan) {
+    candidate.editPlan.audioEvents = buildAudioEventsFromAssetPlan(
+      candidate.assetPlan,
+      candidate.editPlan.moments,
+      candidate.duration
+    );
+    candidate.editPlan.visualOverlays = buildVisualOverlaysFromAssetPlan(
+      candidate.assetPlan,
+      candidate.editPlan.moments,
+      candidate.duration
+    );
+    candidate.editPlan.musicTrack = candidate.assetPlan.musicTrack;
+    candidate.editPlan.duckingSettings = candidate.assetPlan.duckingSettings;
+    candidate.editPlan.legacyAssetPlan = candidate.assetPlan;
+  }
+}
 
 export class JobManager {
   private baseJobsDir: string;
@@ -87,6 +125,14 @@ export class JobManager {
           try {
             const raw = fs.readFileSync(metaPath, 'utf8');
             const data: JobMetadata = JSON.parse(raw);
+            if (data.candidates && Array.isArray(data.candidates)) {
+              for (const cand of data.candidates) {
+                if (cand.assetPlan) {
+                  cand.assetPlan = migrateAssetPlan(cand.assetPlan, cand.duration);
+                  syncAssetPlanToEditPlan(cand);
+                }
+              }
+            }
             this.jobs.set(data.id, data);
           } catch (err) {
             console.warn(`Failed to parse job metadata in ${jobDir}:`, err);
@@ -367,32 +413,11 @@ export class JobManager {
       animation: 'fade' as const,
     }));
 
-    // Build VisualOverlayPlan from assetPlan beats
-    const visualOverlays = (candidate.assetPlan?.beats ?? []).map((beat, i) => ({
-      id: `visual_${i}`,
-      type: 'meme-image' as const,
-      assetPath: beat.meme?.filePath ?? '',
-      start: beat.timestamp,
-      end: Math.min(clipDur, beat.timestamp + beat.duration),
-      xNorm: 0.5 - 0.15,
-      yNorm: 0.12,
-      widthNorm: 0.30,
-      heightNorm: 0.20,
-      opacity: 0.92,
-      momentId: moments.find((m) => Math.abs(m.timestamp - beat.timestamp) < 1.5)?.id,
-    })).filter((v) => v.assetPath);
+    // Build VisualOverlayPlan from assetPlan beats (memes)
+    const visualOverlays = buildVisualOverlaysFromAssetPlan(candidate.assetPlan, moments, clipDur);
 
-    // Build AudioEventPlan from assetPlan beats (SFX)
-    const audioEvents = (candidate.assetPlan?.beats ?? []).map((beat, i) => ({
-      id: `audio_${i}`,
-      type: 'sfx' as const,
-      assetPath: beat.sfx?.filePath ?? '',
-      triggerAt: beat.timestamp,
-      volume: 0.85,
-      fadeIn: 0.05,
-      fadeOut: 0.3,
-      momentId: moments.find((m) => Math.abs(m.timestamp - beat.timestamp) < 1.5)?.id,
-    })).filter((a) => a.assetPath);
+    // Build AudioEventPlan from assetPlan sfxEvents (or beats fallback)
+    const audioEvents = buildAudioEventsFromAssetPlan(candidate.assetPlan, moments, clipDur);
 
     // Build EffectPlan from high-confidence moments
     const effects = moments
@@ -474,7 +499,8 @@ export class JobManager {
 
     const cand = job.candidates.find((c) => c.id === candidateId);
     if (cand) {
-      cand.assetPlan = assetPlan;
+      cand.assetPlan = migrateAssetPlan(assetPlan, cand.duration);
+      syncAssetPlanToEditPlan(cand);
       fs.writeFileSync(
         path.join(job.jobDir, 'candidates', 'candidates.json'),
         JSON.stringify(job.candidates, null, 2),
@@ -567,6 +593,11 @@ export class JobManager {
       let finalPath: string;
       let renderEngine: 'hypit' | 'ffmpeg-fallback' = 'ffmpeg-fallback';
       let enhancedPath: string | undefined;
+      // Always migrate and synchronize assetPlan into editPlan right before rendering
+      if (candidate.assetPlan) {
+        candidate.assetPlan = migrateAssetPlan(candidate.assetPlan, candidate.duration);
+        syncAssetPlanToEditPlan(candidate);
+      }
 
       if (candidate.editPlan) {
         // New path: use ClipEditPlan + renderEngine + videoEnhancer

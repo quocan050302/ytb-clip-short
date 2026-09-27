@@ -10,8 +10,10 @@ import {
   ClipAssetPlan,
   ClipEditPlan,
   RenderedClip,
+  AudioEventPlan,
 } from './types';
-import { renderWithEditPlan, RenderResult } from './renderEngine';
+import { renderWithEditPlan, RenderResult, probeAudioDuration, probeHasAudio } from './renderEngine';
+import { buildAudioEventsFromAssetPlan, migrateAssetPlan } from './autoAssetPlanner';
 import { enhanceVideo } from './videoEnhancer';
 
 export class HypitAdapter {
@@ -670,13 +672,16 @@ ${memeItems}  </media-track:Track>
       bgmInputIdx = nextInputIdx++;
     }
 
-    // Collect SFX inputs
-    const sfxInputsMap: Array<{ inputIdx: number; beat: any }> = [];
-    if (settings.sfx && assetPlan?.beats) {
-      for (const beat of assetPlan.beats) {
-        if (beat.sfx && fs.existsSync(beat.sfx.filePath)) {
-          ffmpegArgs.push('-i', beat.sfx.filePath);
-          sfxInputsMap.push({ inputIdx: nextInputIdx++, beat });
+    // Collect SFX inputs from sfxEvents (or migrated beats)
+    const sfxInputsMap: Array<{ inputIdx: number; plan: AudioEventPlan }> = [];
+    if (settings.sfx && assetPlan) {
+      const audioEvents = buildAudioEventsFromAssetPlan(assetPlan, undefined, clipDuration);
+      for (const ae of audioEvents) {
+        if (fs.existsSync(ae.assetPath)) {
+          ffmpegArgs.push('-i', ae.assetPath);
+          sfxInputsMap.push({ inputIdx: nextInputIdx++, plan: ae });
+        } else {
+          onLog(`[HypitAdapter][${clipId}] CẢNH BÁO: Bỏ qua SFX "${ae.id}" vì không tìm thấy file: ${ae.assetPath}`);
         }
       }
     }
@@ -724,7 +729,17 @@ ${memeItems}  </media-track:Track>
 
     // Construct Audio Filters (Speech + Ducked BGM + SFX)
     const afChains: string[] = [];
-    const mixLabels: string[] = ['[0:a]'];
+    const ffprobePath = await this.getFfprobePath();
+    const hasBaseAudio = await probeHasAudio(inputVideo, ffprobePath);
+    let baseAudioLabel = '[0:a]';
+    if (!hasBaseAudio) {
+      onLog(`[HypitAdapter][${clipId}] Video nguồn không có audio stream -> tạo silent audio base`);
+      afChains.push(
+        `aevalsrc=0:d=${clipDuration.toFixed(2)}:s=44100:c=stereo[a_silent_base]`
+      );
+      baseAudioLabel = '[a_silent_base]';
+    }
+    const mixLabels: string[] = [baseAudioLabel];
 
     // Process BGM with ducking
     if (bgmInputIdx !== -1 && assetPlan) {
@@ -757,27 +772,49 @@ ${memeItems}  </media-track:Track>
       mixLabels.push('[a_bgm]');
     }
 
-    // Process SFX at exact beat timestamps
-    sfxInputsMap.forEach(({ inputIdx, beat }, i) => {
+    // Process SFX events with duration probe, clamped volume, internal afade then adelay
+    for (let i = 0; i < sfxInputsMap.length; i++) {
+      const { inputIdx, plan } = sfxInputsMap[i];
+      const fileDur = await probeAudioDuration(plan.assetPath, ffprobePath);
+      const trig = Math.max(0, Math.min(clipDuration - 0.05, plan.triggerAt));
+      const maxPossibleDur = Math.max(0.1, clipDuration - trig);
+      const chosenDur = (plan.duration && plan.duration > 0) ? plan.duration : fileDur;
+      const playDuration = Math.min(chosenDur, fileDur, maxPossibleDur);
+
+      const clampedFadeIn = Math.min(Math.max(0, plan.fadeIn ?? 0.05), playDuration / 2);
+      const clampedFadeOut = Math.min(Math.max(0, plan.fadeOut ?? 0.2), playDuration - clampedFadeIn);
+      const fadeOutStart = Math.max(0, playDuration - clampedFadeOut);
+      const clampedVolume = Math.max(0.05, Math.min(2.0, plan.volume ?? 0.85));
+      const delayMs = Math.max(0, Math.round(trig * 1000));
       const label = `a_sfx_${i}`;
-      const delayMs = Math.max(0, Math.round(beat.timestamp * 1000));
+
       afChains.push(
-        `[${inputIdx}:a]volume=0.85,adelay=${delayMs}|${delayMs}[${label}]`
+        `[${inputIdx}:a]atrim=end=${playDuration.toFixed(3)},` +
+        `asetpts=PTS-STARTPTS,` +
+        `aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,` +
+        `volume=${clampedVolume.toFixed(2)},` +
+        `afade=t=in:st=0:d=${clampedFadeIn.toFixed(3)},` +
+        `afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${clampedFadeOut.toFixed(3)},` +
+        `adelay=${delayMs}|${delayMs}` +
+        `[${label}]`
       );
       mixLabels.push(`[${label}]`);
-    });
+    }
 
-    // Mix all audio tracks together
+    // Mix all audio tracks together with limiter
     let filterComplex = '';
     if (vfChains.length > 0) {
       filterComplex += vfChains.join(';') + ';';
     }
 
-    let finalALabel = '0:a';
+    let finalALabel = hasBaseAudio ? '0:a' : 'a_silent_base';
     if (mixLabels.length > 1) {
       filterComplex += afChains.join(';') + ';';
-      filterComplex += `${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:dropout_transition=2[a_out]`;
+      filterComplex += `${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:dropout_transition=2,alimiter=limit=0.95:level=true:attack=5:release=50[a_out]`;
       finalALabel = 'a_out';
+    } else if (!hasBaseAudio) {
+      filterComplex += afChains.join(';') + ';';
+      finalALabel = 'a_silent_base';
     }
 
     ffmpegArgs.push(

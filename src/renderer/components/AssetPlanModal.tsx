@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Sparkles,
   Music,
@@ -11,7 +11,12 @@ import {
   ShieldCheck,
   Clock,
   Volume2,
+  VolumeX,
+  Play,
+  Square,
+  AlertTriangle,
   Info,
+  Sliders,
 } from 'lucide-react';
 import {
   AssetItem,
@@ -19,6 +24,7 @@ import {
   BeatType,
   ClipAssetPlan,
   ClipCandidate,
+  PlannedSfxEvent,
 } from '../../main/types';
 
 interface AssetPlanModalProps {
@@ -35,24 +41,63 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
   const [availableMemes, setAvailableMemes] = useState<AssetItem[]>([]);
   const [availableSfx, setAvailableSfx] = useState<AssetItem[]>([]);
   const [availableMusic, setAvailableMusic] = useState<AssetItem[]>([]);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
-  // Local editable copy of plan
+  // Audio audition state
+  const [playingAssetId, setPlayingAssetId] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Local editable copy of plan with automatic migration to sfxEvents[]
   const [plan, setPlan] = useState<ClipAssetPlan>(() => {
+    let initialPlan: ClipAssetPlan;
     if (candidate.assetPlan) {
-      return JSON.parse(JSON.stringify(candidate.assetPlan));
+      initialPlan = JSON.parse(JSON.stringify(candidate.assetPlan));
+    } else {
+      initialPlan = {
+        clipId: candidate.id,
+        musicTrack: null,
+        beats: [],
+        sfxEvents: [],
+        duckingSettings: {
+          normalVolume: 0.22,
+          duckedVolume: 0.06,
+          fadeInDuration: 0.5,
+          fadeOutDuration: 1.0,
+        },
+      };
     }
-    return {
-      clipId: candidate.id,
-      musicTrack: null,
-      beats: [],
-      duckingSettings: {
-        normalVolume: 0.22,
-        duckedVolume: 0.06,
-        fadeInDuration: 0.5,
-        fadeOutDuration: 1.0,
-      },
-    };
+
+    // Ensure sfxEvents is populated from beats if missing
+    if (!initialPlan.sfxEvents || !Array.isArray(initialPlan.sfxEvents)) {
+      initialPlan.sfxEvents = (initialPlan.beats || [])
+        .filter((b: BeatEvent) => b.sfx && b.sfx.filePath)
+        .map((b: BeatEvent, i: number) => ({
+          id: `sfx_migrated_${b.id || i}`,
+          asset: b.sfx,
+          triggerAt: Math.max(0, Math.min(Math.max(0, candidate.duration - 0.1), b.timestamp)),
+          duration: b.duration,
+          volume: 0.85,
+          fadeIn: 0.05,
+          fadeOut: 0.25,
+          enabled: true,
+          sourceBeatId: b.id,
+          origin: 'auto' as const,
+          reason: b.reason || `SFX đồng bộ theo beat ${b.beatType}`,
+        }));
+    }
+
+    return initialPlan;
   });
+
+  // Stop audition audio on unmount
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
 
   // Fetch verified local library assets
   useEffect(() => {
@@ -75,15 +120,78 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
     loadAssets();
   }, []);
 
+  // Audio audition preview handler
+  const handleToggleAudition = (filePath: string, id: string) => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+
+    if (playingAssetId === id) {
+      setPlayingAssetId(null);
+      return;
+    }
+
+    if (!filePath) return;
+
+    try {
+      const src = filePath.startsWith('http') || filePath.startsWith('file:')
+        ? filePath
+        : `file://${filePath}`;
+      const audio = new Audio(src);
+      audio.onended = () => setPlayingAssetId(null);
+      audio.onerror = () => setPlayingAssetId(null);
+      audio.play().then(() => {
+        audioRef.current = audio;
+        setPlayingAssetId(id);
+      }).catch(() => {
+        setPlayingAssetId(null);
+      });
+    } catch {
+      setPlayingAssetId(null);
+    }
+  };
+
+  // ── Beat Actions ────────────────────────────────────────────────────────────
+
   const handleUpdateBeat = (index: number, updated: Partial<BeatEvent>) => {
+    const oldBeat = plan.beats[index];
     const newBeats = [...plan.beats];
-    newBeats[index] = { ...newBeats[index], ...updated };
-    setPlan({ ...plan, beats: newBeats });
+    const updatedBeat = { ...oldBeat, ...updated };
+    newBeats[index] = updatedBeat;
+
+    let newSfxEvents = [...(plan.sfxEvents || [])];
+
+    // If beat timestamp moved, propagate shift to all linked 'auto' SFX events
+    if (updated.timestamp !== undefined && updated.timestamp !== oldBeat.timestamp) {
+      const delta = updated.timestamp - oldBeat.timestamp;
+      newSfxEvents = newSfxEvents.map((evt) => {
+        if (evt.sourceBeatId === oldBeat.id && evt.origin === 'auto') {
+          const newTrig = Math.max(0, Math.min(candidate.duration - 0.05, Math.round((evt.triggerAt + delta) * 10) / 10));
+          return { ...evt, triggerAt: newTrig };
+        }
+        return evt;
+      });
+    }
+
+    setPlan({ ...plan, beats: newBeats, sfxEvents: newSfxEvents });
   };
 
   const handleDeleteBeat = (index: number) => {
+    const beatToDelete = plan.beats[index];
     const newBeats = plan.beats.filter((_, i) => i !== index);
-    setPlan({ ...plan, beats: newBeats });
+
+    // Rule: deleting a beat only removes linked 'auto' SFX events; manual SFX are preserved
+    const newSfxEvents = (plan.sfxEvents || [])
+      .filter((evt) => !(evt.sourceBeatId === beatToDelete.id && evt.origin === 'auto'))
+      .map((evt) => {
+        if (evt.sourceBeatId === beatToDelete.id) {
+          return { ...evt, sourceBeatId: undefined };
+        }
+        return evt;
+      });
+
+    setPlan({ ...plan, beats: newBeats, sfxEvents: newSfxEvents });
   };
 
   const handleAddBeat = () => {
@@ -98,30 +206,106 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
       fingerprint: 'local',
       tags: [],
     };
-    const fallbackSfx = availableSfx[0] || {
-      id: 'sfx_whoosh',
-      name: 'Whoosh Transition SFX',
-      type: 'sfx',
-      filePath: '',
-      sourceUrl: 'urn:autoclip:sfx:whoosh',
-      license: 'CC0 1.0 Universal',
-      fetchedAt: new Date().toISOString(),
-      fingerprint: 'local',
-      tags: [],
-    };
+
+    const newBeatId = `beat_custom_${Date.now()}`;
+    const newBeatTimestamp = Math.round((candidate.duration / 2) * 10) / 10;
 
     const newBeat: BeatEvent = {
-      id: `beat_custom_${Date.now()}`,
+      id: newBeatId,
       beatType: 'surprise',
-      timestamp: Math.round((candidate.duration / 2) * 10) / 10,
+      timestamp: newBeatTimestamp,
       duration: 1.5,
       meme: fallbackMeme,
-      sfx: fallbackSfx,
+      sfx: availableSfx[0],
       confidence: 1.0,
       reason: 'Beat người dùng thêm thủ công',
     };
 
     setPlan({ ...plan, beats: [...plan.beats, newBeat] });
+  };
+
+  // ── SFX Timeline Actions ───────────────────────────────────────────────────
+
+  const handleAddSfx = (targetTime?: number, sourceBeatId?: string) => {
+    if (availableSfx.length === 0) return;
+
+    const trig = targetTime !== undefined
+      ? Math.max(0, Math.min(candidate.duration - 0.05, Math.round(targetTime * 10) / 10))
+      : Math.round((candidate.duration / 3) * 10) / 10;
+
+    const defaultAsset = availableSfx[0];
+    const newEvent: PlannedSfxEvent = {
+      id: `sfx_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      asset: defaultAsset,
+      triggerAt: trig,
+      duration: undefined,
+      volume: 0.85,
+      fadeIn: 0.05,
+      fadeOut: 0.25,
+      enabled: true,
+      sourceBeatId,
+      origin: 'manual',
+      reason: sourceBeatId ? `SFX thủ công tại beat ${sourceBeatId}` : 'SFX thêm thủ công vào timeline',
+    };
+
+    setPlan({
+      ...plan,
+      sfxEvents: [...(plan.sfxEvents || []), newEvent],
+    });
+  };
+
+  const handleUpdateSfx = (id: string, updated: Partial<PlannedSfxEvent>) => {
+    const newEvents = (plan.sfxEvents || []).map((evt) => {
+      if (evt.id === id) {
+        const next = { ...evt, ...updated };
+        // If user manually changed triggerAt on an auto event, decouple to manual
+        if (updated.triggerAt !== undefined && updated.triggerAt !== evt.triggerAt) {
+          next.origin = 'manual';
+        }
+        return next;
+      }
+      return evt;
+    });
+    setPlan({ ...plan, sfxEvents: newEvents });
+  };
+
+  const handleDeleteSfx = (id: string) => {
+    const newEvents = (plan.sfxEvents || []).filter((e) => e.id !== id);
+    setPlan({ ...plan, sfxEvents: newEvents });
+  };
+
+  // ── Validation & Save ──────────────────────────────────────────────────────
+
+  const handleSaveModal = () => {
+    const events = plan.sfxEvents || [];
+    for (const evt of events) {
+      if (evt.enabled !== false) {
+        if (evt.triggerAt < 0 || evt.triggerAt >= candidate.duration) {
+          setValidationError(
+            `SFX "${evt.asset.name}" có mốc thời gian (${evt.triggerAt}s) nằm ngoài phạm vi Short (0s – ${candidate.duration.toFixed(1)}s).`
+          );
+          return;
+        }
+        if (evt.volume < 0.05 || evt.volume > 2.0) {
+          setValidationError(
+            `SFX "${evt.asset.name}" có mức âm lượng không hợp lệ (phải từ 5% đến 200%).`
+          );
+          return;
+        }
+        if (evt.fadeIn < 0 || evt.fadeOut < 0) {
+          setValidationError(`SFX "${evt.asset.name}" có fade in hoặc fade out âm.`);
+          return;
+        }
+      }
+    }
+
+    setValidationError(null);
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    onSave(plan);
+    onClose();
   };
 
   const getBeatBadge = (type: BeatType) => {
@@ -141,12 +325,14 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
     }
   };
 
+  const sfxEventsSorted = [...(plan.sfxEvents || [])].sort((a, b) => a.triggerAt - b.triggerAt);
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div
         className="modal-content"
         onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: 860, maxHeight: '90vh', overflowY: 'auto' }}
+        style={{ maxWidth: 920, maxHeight: '92vh', overflowY: 'auto' }}
       >
         {/* Header */}
         <div
@@ -162,7 +348,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
           <div>
             <h4
               style={{
-                fontSize: '1.15rem',
+                fontSize: '1.2rem',
                 fontWeight: 700,
                 display: 'flex',
                 alignItems: 'center',
@@ -170,11 +356,11 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
               }}
             >
               <Sparkles size={20} color="var(--accent-primary)" />
-              Auto Asset Plan — {candidate.title}
+              Kế Hoạch Asset & SFX Timeline — {candidate.title}
             </h4>
             <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>
               Đoạn clip: {candidate.start.toFixed(1)}s ➔ {candidate.end.toFixed(1)}s ({candidate.duration.toFixed(1)} giây).
-              Meme và SFX tại mỗi beat luôn được khóa chung một mốc thời gian.
+              Hỗ trợ nhiều SFX tại mọi mốc thời gian, tách độc lập với beat và không giới hạn số lượng.
             </span>
           </div>
 
@@ -182,6 +368,27 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
             <X size={16} />
           </button>
         </div>
+
+        {/* Validation Error Alert */}
+        {validationError && (
+          <div
+            style={{
+              background: 'rgba(239, 68, 68, 0.15)',
+              border: '1px solid var(--status-danger)',
+              borderRadius: 'var(--radius-sm)',
+              padding: '10px 14px',
+              marginBottom: 16,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: '0.82rem',
+              color: '#FCA5A5',
+            }}
+          >
+            <AlertTriangle size={16} color="var(--status-danger)" />
+            <span>{validationError}</span>
+          </div>
+        )}
 
         {/* 1. MUSIC & DUCKING SECTION */}
         <div
@@ -205,7 +412,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
 
           <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 16, alignItems: 'center' }}>
             <div>
-              <label className="input-label" style={{ fontSize: '0.78rem' }}>Bài nhạc đã chọn tự động:</label>
+              <label className="input-label" style={{ fontSize: '0.78rem' }}>Bài nhạc đã chọn:</label>
               <select
                 className="text-input"
                 style={{ width: '100%', fontSize: '0.85rem', cursor: 'pointer' }}
@@ -224,7 +431,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
               </select>
               {plan.musicTrack && (
                 <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4 }}>
-                  Nguồn: <code>{plan.musicTrack.sourceUrl}</code> | Giấy phép: <strong>{plan.musicTrack.license}</strong> | Fingerprint: <code>{plan.musicTrack.fingerprint}</code>
+                  Nguồn: <code>{plan.musicTrack.sourceUrl}</code> | Giấy phép: <strong>{plan.musicTrack.license}</strong>
                 </div>
               )}
             </div>
@@ -256,7 +463,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
           </div>
         </div>
 
-        {/* 2. BEATS TIMELINE SECTION */}
+        {/* 2. SFX TIMELINE SECTION (MULTI-SFX INDEPENDENT TIMELINE) */}
         <div
           style={{
             background: 'var(--bg-elevated)',
@@ -268,8 +475,276 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700, fontSize: '0.95rem' }}>
-              <Zap size={18} color="var(--status-warning)" />
-              Timeline Đồng Bộ Beat ({plan.beats.length} beats phát hiện)
+              <Volume2 size={18} color="var(--status-warning)" />
+              Timeline SFX của Short
+              <span className="badge badge-score" style={{ fontSize: '0.72rem', marginLeft: 6 }}>
+                {sfxEventsSorted.length} SFX trong Short
+              </span>
+            </div>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => handleAddSfx()}
+              style={{ padding: '4px 12px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: 6 }}
+            >
+              <Plus size={14} /> + Thêm SFX
+            </button>
+          </div>
+
+          <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginBottom: 12 }}>
+            Một Short có thể dùng nhiều SFX tại nhiều thời điểm (kể cả nhiều SFX quanh cùng một beat). Bạn có thể thêm, đổi âm thanh, nghe thử, chỉnh volume và fade theo ý muốn.
+          </div>
+
+          {sfxEventsSorted.length === 0 ? (
+            <div
+              style={{
+                textAlign: 'center',
+                padding: '24px 0',
+                color: 'var(--text-dim)',
+                fontSize: '0.85rem',
+                background: 'rgba(0,0,0,0.2)',
+                borderRadius: 'var(--radius-sm)',
+              }}
+            >
+              Chưa có SFX nào trong Short này. Bấm <strong>"+ Thêm SFX"</strong> để bổ sung hiệu ứng âm thanh.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {sfxEventsSorted.map((evt) => {
+                const isPlaying = playingAssetId === evt.id;
+                const isLinkedToBeat = !!evt.sourceBeatId;
+                const linkedBeat = plan.beats.find((b) => b.id === evt.sourceBeatId);
+
+                return (
+                  <div
+                    key={evt.id}
+                    style={{
+                      background: evt.enabled !== false ? 'rgba(15, 20, 32, 0.75)' : 'rgba(15, 20, 32, 0.35)',
+                      border: `1px solid ${evt.enabled !== false ? 'var(--border-subtle)' : 'rgba(255,255,255,0.04)'}`,
+                      borderRadius: 'var(--radius-sm)',
+                      padding: '12px 14px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 10,
+                      opacity: evt.enabled !== false ? 1 : 0.6,
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    {/* Event Header Bar */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <input
+                          type="checkbox"
+                          checked={evt.enabled !== false}
+                          onChange={(e) => handleUpdateSfx(evt.id, { enabled: e.target.checked })}
+                          title="Bật / Tắt SFX này"
+                          style={{ cursor: 'pointer', width: 15, height: 15 }}
+                        />
+
+                        <span style={{ fontSize: '0.85rem', fontFamily: 'var(--font-mono)', color: 'var(--status-warning)', fontWeight: 700 }}>
+                          @{evt.triggerAt.toFixed(1)}s
+                        </span>
+
+                        <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                          — {evt.asset.name}
+                        </span>
+
+                        <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                          — Vol: {Math.round((evt.volume ?? 0.85) * 100)}%
+                        </span>
+
+                        <span
+                          className={`badge ${evt.origin === 'auto' ? 'badge-secondary' : 'badge-hook'}`}
+                          style={{ fontSize: '0.68rem', padding: '1px 6px' }}
+                        >
+                          {evt.origin === 'auto'
+                            ? `Auto: ${linkedBeat ? `Beat ${linkedBeat.beatType}` : 'Hệ thống gợi ý'}`
+                            : (isLinkedToBeat ? `Thủ công tại beat ${linkedBeat?.beatType || ''}` : 'Thủ công độc lập')}
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {/* Audition Button */}
+                        <button
+                          className={`btn ${isPlaying ? 'btn-danger' : 'btn-secondary'} btn-sm`}
+                          style={{ padding: '3px 8px', fontSize: '0.72rem', display: 'flex', alignItems: 'center', gap: 4 }}
+                          onClick={() => handleToggleAudition(evt.asset.filePath, evt.id)}
+                          title="Nghe thử âm thanh SFX này"
+                        >
+                          {isPlaying ? <Square size={11} /> : <Play size={11} />}
+                          {isPlaying ? 'Dừng' : 'Nghe thử'}
+                        </button>
+
+                        {/* Delete Button */}
+                        <button
+                          className="btn btn-danger btn-sm"
+                          style={{ padding: '3px 6px' }}
+                          onClick={() => handleDeleteSfx(evt.id)}
+                          title="Xóa SFX này"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* SFX Reason */}
+                    {evt.reason && (
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontStyle: 'italic' }}>
+                        Lý do: {evt.reason}
+                      </div>
+                    )}
+
+                    {/* Event Detail Editor Grid */}
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'minmax(180px, 1.5fr) 100px 90px 110px 80px 80px',
+                        gap: 8,
+                        alignItems: 'flex-end',
+                      }}
+                    >
+                      {/* Asset Dropdown */}
+                      <div>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-dim)', display: 'block', marginBottom: 2 }}>
+                          Hiệu ứng âm thanh (SFX):
+                        </label>
+                        <select
+                          className="text-input"
+                          style={{ width: '100%', fontSize: '0.78rem', padding: '4px 6px' }}
+                          value={evt.asset.id}
+                          onChange={(e) => {
+                            const found = availableSfx.find((s) => s.id === e.target.value);
+                            if (found) handleUpdateSfx(evt.id, { asset: found });
+                          }}
+                        >
+                          {availableSfx.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name} ({s.license})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* TriggerAt */}
+                      <div>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-dim)', display: 'block', marginBottom: 2 }}>
+                          Bắt đầu (s):
+                        </label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          max={Math.max(0, candidate.duration - 0.05)}
+                          className="text-input"
+                          style={{ width: '100%', fontSize: '0.78rem', padding: '4px 6px' }}
+                          value={evt.triggerAt}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            handleUpdateSfx(evt.id, { triggerAt: isNaN(val) ? 0 : val });
+                          }}
+                        />
+                      </div>
+
+                      {/* Duration */}
+                      <div>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-dim)', display: 'block', marginBottom: 2 }}>
+                          Thời lượng (s):
+                        </label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0.1"
+                          max="10"
+                          placeholder="Hết file"
+                          className="text-input"
+                          style={{ width: '100%', fontSize: '0.78rem', padding: '4px 6px' }}
+                          value={evt.duration ?? ''}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            handleUpdateSfx(evt.id, { duration: isNaN(val) ? undefined : val });
+                          }}
+                        />
+                      </div>
+
+                      {/* Volume */}
+                      <div>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-dim)', display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                          <span>Âm lượng:</span>
+                          <span style={{ fontWeight: 600 }}>{Math.round((evt.volume ?? 0.85) * 100)}%</span>
+                        </label>
+                        <input
+                          type="range"
+                          min="0.1"
+                          max="1.8"
+                          step="0.05"
+                          style={{ width: '100%', cursor: 'pointer' }}
+                          value={evt.volume ?? 0.85}
+                          onChange={(e) => {
+                            handleUpdateSfx(evt.id, { volume: parseFloat(e.target.value) });
+                          }}
+                        />
+                      </div>
+
+                      {/* Fade In */}
+                      <div>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-dim)', display: 'block', marginBottom: 2 }}>
+                          Fade in (s):
+                        </label>
+                        <input
+                          type="number"
+                          step="0.05"
+                          min="0"
+                          max="1.5"
+                          className="text-input"
+                          style={{ width: '100%', fontSize: '0.78rem', padding: '4px 6px' }}
+                          value={evt.fadeIn ?? 0.05}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            handleUpdateSfx(evt.id, { fadeIn: isNaN(val) ? 0 : val });
+                          }}
+                        />
+                      </div>
+
+                      {/* Fade Out */}
+                      <div>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-dim)', display: 'block', marginBottom: 2 }}>
+                          Fade out (s):
+                        </label>
+                        <input
+                          type="number"
+                          step="0.05"
+                          min="0"
+                          max="2.0"
+                          className="text-input"
+                          style={{ width: '100%', fontSize: '0.78rem', padding: '4px 6px' }}
+                          value={evt.fadeOut ?? 0.25}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            handleUpdateSfx(evt.id, { fadeOut: isNaN(val) ? 0 : val });
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* 3. BEATS & VISUAL OVERLAYS SECTION */}
+        <div
+          style={{
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-md)',
+            padding: '16px 18px',
+            marginBottom: 16,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700, fontSize: '0.95rem' }}>
+              <Zap size={18} color="var(--accent-secondary)" />
+              Timeline Beat & Meme Visual ({plan.beats.length} beats)
             </div>
             <button className="btn btn-secondary btn-sm" onClick={handleAddBeat} style={{ padding: '4px 10px', fontSize: '0.75rem' }}>
               <Plus size={13} /> Thêm Beat
@@ -282,118 +757,135 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {plan.beats.map((beat, idx) => (
-                <div
-                  key={beat.id || idx}
-                  style={{
-                    background: 'rgba(15, 20, 32, 0.6)',
-                    border: '1px solid var(--border-subtle)',
-                    borderRadius: 'var(--radius-sm)',
-                    padding: '12px 14px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 8,
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      {getBeatBadge(beat.beatType)}
-                      <span style={{ fontSize: '0.82rem', fontFamily: 'var(--font-mono)', color: 'var(--accent-primary)', fontWeight: 600 }}>
-                        @{beat.timestamp.toFixed(1)}s (kéo dài {beat.duration.toFixed(1)}s)
-                      </span>
-                      <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
-                        Độ tin cậy: {Math.round(beat.confidence * 100)}%
-                      </span>
-                    </div>
+              {plan.beats.map((beat, idx) => {
+                const linkedSfx = (plan.sfxEvents || []).filter((e) => e.sourceBeatId === beat.id);
 
-                    <button
-                      className="btn btn-danger btn-sm"
-                      style={{ padding: '2px 6px' }}
-                      onClick={() => handleDeleteBeat(idx)}
-                      title="Xóa beat này"
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
+                return (
+                  <div
+                    key={beat.id || idx}
+                    style={{
+                      background: 'rgba(15, 20, 32, 0.6)',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: 'var(--radius-sm)',
+                      padding: '12px 14px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {getBeatBadge(beat.beatType)}
+                        <span style={{ fontSize: '0.82rem', fontFamily: 'var(--font-mono)', color: 'var(--accent-primary)', fontWeight: 600 }}>
+                          @{beat.timestamp.toFixed(1)}s (kéo dài {beat.duration.toFixed(1)}s)
+                        </span>
+                        <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                          Độ tin cậy: {Math.round(beat.confidence * 100)}%
+                        </span>
+                      </div>
 
-                  {/* Beat reason */}
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                    "{beat.reason}"
-                  </div>
-
-                  {/* Synchronized Pair Settings */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 120px', gap: 10, alignItems: 'center' }}>
-                    {/* Paired Meme */}
-                    <div>
-                      <label style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <Film size={12} color="var(--accent-secondary)" />
-                        Meme Overlay (Visual):
-                      </label>
-                      <select
-                        className="text-input"
-                        style={{ width: '100%', fontSize: '0.8rem', padding: '4px 8px', marginTop: 2 }}
-                        value={beat.meme?.id || ''}
-                        onChange={(e) => {
-                          const found = availableMemes.find((m) => m.id === e.target.value);
-                          if (found) handleUpdateBeat(idx, { meme: found });
-                        }}
+                      <button
+                        className="btn btn-danger btn-sm"
+                        style={{ padding: '2px 6px' }}
+                        onClick={() => handleDeleteBeat(idx)}
+                        title="Xóa beat này"
                       >
-                        {availableMemes.map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.name} ({m.license})
-                          </option>
-                        ))}
-                      </select>
+                        <Trash2 size={13} />
+                      </button>
                     </div>
 
-                    {/* Paired SFX */}
-                    <div>
-                      <label style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <Volume2 size={12} color="var(--status-warning)" />
-                        SFX Âm Thanh Trùng Mốc (Audio):
-                      </label>
-                      <select
-                        className="text-input"
-                        style={{ width: '100%', fontSize: '0.8rem', padding: '4px 8px', marginTop: 2 }}
-                        value={beat.sfx?.id || ''}
-                        onChange={(e) => {
-                          const found = availableSfx.find((s) => s.id === e.target.value);
-                          if (found) handleUpdateBeat(idx, { sfx: found });
-                        }}
-                      >
-                        {availableSfx.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.name} ({s.license})
-                          </option>
-                        ))}
-                      </select>
+                    {/* Beat reason */}
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                      "{beat.reason}"
                     </div>
 
-                    {/* Timestamp Edit */}
-                    <div>
-                      <label style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <Clock size={12} />
-                        Mốc (giây):
-                      </label>
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="0"
-                        max={candidate.duration}
-                        className="text-input"
-                        style={{ width: '100%', fontSize: '0.8rem', padding: '4px 8px', marginTop: 2 }}
-                        value={beat.timestamp}
-                        onChange={(e) => handleUpdateBeat(idx, { timestamp: parseFloat(e.target.value) || 0 })}
-                      />
+                    {/* Controls */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 110px', gap: 10, alignItems: 'center' }}>
+                      {/* Paired Meme */}
+                      <div>
+                        <label style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <Film size={12} color="var(--accent-secondary)" />
+                          Meme Overlay (Visual):
+                        </label>
+                        <select
+                          className="text-input"
+                          style={{ width: '100%', fontSize: '0.8rem', padding: '4px 8px', marginTop: 2 }}
+                          value={beat.meme?.id || ''}
+                          onChange={(e) => {
+                            const found = availableMemes.find((m) => m.id === e.target.value);
+                            if (found) handleUpdateBeat(idx, { meme: found });
+                          }}
+                        >
+                          {availableMemes.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.name} ({m.license})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Linked SFX Summary & Add button */}
+                      <div>
+                        <label style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <Volume2 size={12} color="var(--status-warning)" />
+                            SFX liên kết ({linkedSfx.length}):
+                          </span>
+                        </label>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          {linkedSfx.length === 0 ? (
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontStyle: 'italic' }}>
+                              Chưa có SFX tại beat này
+                            </span>
+                          ) : (
+                            linkedSfx.map((s) => (
+                              <span
+                                key={s.id}
+                                className="badge badge-secondary"
+                                style={{ fontSize: '0.7rem', padding: '2px 6px' }}
+                                title={`@${s.triggerAt.toFixed(1)}s - Vol: ${Math.round(s.volume * 100)}%`}
+                              >
+                                {s.asset.name} (@{s.triggerAt.toFixed(1)}s)
+                              </span>
+                            ))
+                          )}
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            style={{ padding: '2px 6px', fontSize: '0.7rem', display: 'inline-flex', alignItems: 'center', gap: 2 }}
+                            onClick={() => handleAddSfx(beat.timestamp, beat.id)}
+                            title="Thêm một SFX mới đồng bộ tại beat này"
+                          >
+                            <Plus size={10} /> + SFX tại beat này
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Timestamp Edit */}
+                      <div>
+                        <label style={{ fontSize: '0.72rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <Clock size={12} />
+                          Mốc beat (s):
+                        </label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0"
+                          max={Math.max(0, candidate.duration - 0.05)}
+                          className="text-input"
+                          style={{ width: '100%', fontSize: '0.8rem', padding: '4px 8px', marginTop: 2 }}
+                          value={beat.timestamp}
+                          onChange={(e) => handleUpdateBeat(idx, { timestamp: parseFloat(e.target.value) || 0 })}
+                        />
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
 
-        {/* 3. LICENSING & ZERO-COST GUARANTEE */}
+        {/* 4. LICENSING & ZERO-COST GUARANTEE */}
         <div
           style={{
             background: 'rgba(16, 185, 129, 0.08)',
@@ -424,13 +916,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
           <button className="btn btn-secondary" onClick={onClose}>
             Hủy
           </button>
-          <button
-            className="btn btn-primary"
-            onClick={() => {
-              onSave(plan);
-              onClose();
-            }}
-          >
+          <button className="btn btn-primary" onClick={handleSaveModal}>
             <Check size={15} /> Lưu Kế Hoạch Asset
           </button>
         </div>

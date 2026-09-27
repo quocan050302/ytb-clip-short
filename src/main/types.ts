@@ -150,10 +150,25 @@ export interface DuckingSettings {
   fadeOutDuration: number;
 }
 
+export interface PlannedSfxEvent {
+  id: string;
+  asset: AssetItem;
+  triggerAt: number;       // seconds relative to clip start
+  duration?: number;       // play duration in seconds, <= asset file duration
+  volume: number;          // 0.0 - 1.5, valid and clamped
+  fadeIn: number;          // seconds
+  fadeOut: number;         // seconds
+  enabled: boolean;        // whether event will be rendered
+  sourceBeatId?: string;   // beat id if suggested from beat
+  origin: 'auto' | 'manual';
+  reason?: string;
+}
+
 export interface ClipAssetPlan {
   clipId: string;
   musicTrack: AssetItem | null;
   beats: BeatEvent[];
+  sfxEvents?: PlannedSfxEvent[];
   duckingSettings: DuckingSettings;
 }
 
@@ -215,6 +230,7 @@ export interface AudioEventPlan {
   volume: number;
   fadeIn: number;
   fadeOut: number;
+  duration?: number;
   momentId?: string;
 }
 

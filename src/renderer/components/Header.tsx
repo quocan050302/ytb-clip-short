@@ -1,14 +1,15 @@
 import React from 'react';
-import { Film, CheckCircle2, AlertTriangle, Clock, PlusCircle } from 'lucide-react';
+import { Film, CheckCircle2, AlertTriangle, Clock, PlusCircle, FileAudio } from 'lucide-react';
 import { EnvironmentStatus } from '../../main/types';
 
 interface HeaderProps {
   envStatus: EnvironmentStatus | null;
   onOpenHistory: () => void;
   onNewJob: () => void;
+  onOpenSfxLibrary?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ envStatus, onOpenHistory, onNewJob }) => {
+export const Header: React.FC<HeaderProps> = ({ envStatus, onOpenHistory, onNewJob, onOpenSfxLibrary }) => {
   return (
     <header className="top-bar">
       <div className="brand-section non-drag">
@@ -39,6 +40,18 @@ export const Header: React.FC<HeaderProps> = ({ envStatus, onOpenHistory, onNewJ
           <div className="sys-dot online" />
           <span>Node {envStatus?.nodeVersion || 'v22'}</span>
         </div>
+
+        {/* SFX Library Button */}
+        {onOpenSfxLibrary && (
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={onOpenSfxLibrary}
+            title="Quản lý và import bộ SFX local"
+          >
+            <FileAudio size={14} />
+            Thư viện SFX
+          </button>
+        )}
 
         {/* Actions */}
         <button

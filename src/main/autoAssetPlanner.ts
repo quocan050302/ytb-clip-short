@@ -2,12 +2,14 @@ import { BeatDetector, DetectedBeat } from './beatDetector';
 import { LocalAssetProvider } from './assetProvider';
 import { TrendCatalog } from './trendCatalog';
 import {
+  AssetItem,
   AudioEventPlan,
   BeatEvent,
   ClipAssetPlan,
   ClipCandidate,
   DuckingSettings,
   JobSettings,
+  MomentCandidate,
   MomentEvent,
   PlannedSfxEvent,
   TranscriptSegment,
@@ -81,8 +83,8 @@ export class AutoAssetPlanner {
       fadeOutDuration: 1.0,
     };
 
-    // ── Generate Multi-SFX Timeline (independent timeline) ───────────────────
-    const sfxEvents = this.generateSfxEvents(
+    // ── Generate Multi-SFX Timeline & Moment Candidates (Two-Tier AI Selection) ──
+    const { sfxEvents, suggestedMoments } = this.generateSfxAndMoments(
       candidate,
       settings,
       detected,
@@ -95,25 +97,21 @@ export class AutoAssetPlanner {
       musicTrack,
       beats,
       sfxEvents,
+      suggestedMoments,
       duckingSettings,
     };
   }
 
   /**
-   * Propose evidence-based SFX events across the Short's timeline.
-   * Rules:
-   * - Rule-based suggestion, NOT a fixed quota.
-   * - Allows multiple SFX around moments (e.g. pre-cue whoosh + reaction impact).
-   * - Avoids spamming duplicate SFX in quick succession.
-   * - Minimal suggestions for placeholder transcripts.
+   * Detect granular moment candidates with explicit contextual evidence from
+   * real transcript segments, silences, and audio beats.
    */
-  private generateSfxEvents(
+  detectMoments(
     candidate: ClipCandidate,
-    settings: JobSettings,
-    detectedBeats: DetectedBeat[],
     allSegments: TranscriptSegment[],
-    allSilences: SilenceInterval[]
-  ): PlannedSfxEvent[] {
+    allSilences: SilenceInterval[],
+    detectedBeats: DetectedBeat[]
+  ): MomentCandidate[] {
     const clipDuration = candidate.duration;
     const realSegments = allSegments
       .filter((s) => !s.isPlaceholder && !/^\[Đoạn nói \d+\]/i.test(s.text) && s.end > candidate.start && s.start < candidate.end)
@@ -124,88 +122,164 @@ export class AutoAssetPlanner {
       }));
 
     const isPlaceholder = realSegments.length === 0;
-    const rawEvents: PlannedSfxEvent[] = [];
+    const rawMoments: MomentCandidate[] = [];
+    let momentSeq = 1;
 
-    // Helper to add event
-    let eventSeq = 1;
-    const addEvent = (
-      assetKey: string,
-      triggerAt: number,
-      sourceBeatId: string | undefined,
-      reason: string,
-      volume: number = 0.85,
-      fadeIn: number = 0.05,
-      fadeOut: number = 0.2
-    ) => {
-      const asset = this.assetProvider.getSfxForBeat(assetKey as any, settings.preset);
-      if (!asset || !asset.filePath) return;
-      const clampedTs = Math.max(0, Math.min(clipDuration - 0.15, Math.round(triggerAt * 10) / 10));
-      rawEvents.push({
-        id: `sfx_${Date.now()}_${eventSeq++}`,
-        asset,
-        triggerAt: clampedTs,
-        volume: Math.max(0.2, Math.min(1.2, volume)),
-        fadeIn: Math.max(0, fadeIn),
-        fadeOut: Math.max(0, fadeOut),
-        enabled: true,
-        sourceBeatId,
-        origin: 'auto',
-        reason,
-      });
-    };
-
-    // 1. Hook moment in opening 1-2.5s
+    // 1. Hook moment at start
     const hookBeat = detectedBeats.find((b) => b.type === 'hook');
-    if (hookBeat) {
-      if (!isPlaceholder) {
-        addEvent('hook', hookBeat.timestamp, hookBeat.id, 'Whoosh mở đầu tạo nhịp chú ý cho Short', 0.80, 0.04, 0.2);
-      } else {
-        // If placeholder, add single minimal hook cue for preview
-        addEvent('hook', hookBeat.timestamp, hookBeat.id, 'Gợi ý hook mở đầu (chờ duyệt do thiếu transcript)', 0.70, 0.05, 0.2);
+    const hookTime = hookBeat ? Math.max(0.5, Math.min(2.0, hookBeat.timestamp)) : 1.0;
+    rawMoments.push({
+      id: `moment_hook_${momentSeq++}`,
+      timestamp: hookTime,
+      type: 'hook',
+      evidence: isPlaceholder
+        ? 'Nhịp mở đầu Short (chờ duyệt do thiếu transcript thật)'
+        : 'Nhịp mở đầu Short tạo sự chú ý trong 2 giây đầu tiên',
+      confidence: isPlaceholder ? 0.65 : 0.95,
+      status: isPlaceholder ? 'suggested' : 'approved',
+    });
+
+    if (!isPlaceholder) {
+      // 2. Real transcript context scanning
+      for (const seg of realSegments) {
+        const text = seg.text.toLowerCase();
+
+        // 2a. Cartoon slip: fall/slip keywords
+        if (/\b(trượt|ngã|slip|fall|té|hụt chân|vấp ngã|trượt chân|té xỉu)\b/i.test(text)) {
+          rawMoments.push({
+            id: `moment_slip_${momentSeq++}`,
+            timestamp: Math.max(0.2, Math.min(clipDuration - 0.2, seg.relStart + 0.1)),
+            type: 'slip',
+            evidence: `Phát hiện hành động trượt ngã trong lời thoại: "${seg.text.trim()}" (tại ${seg.relStart.toFixed(1)}s)`,
+            confidence: 0.92,
+            status: 'approved',
+          });
+        }
+
+        // 2b. Money cue: money/cash keywords
+        if (/\b(tiền|money|dollar|triệu|tỷ|đô|cash|lương|giàu|thu nhập|mua|bán|trúng thưởng|tài sản)\b/i.test(text)) {
+          rawMoments.push({
+            id: `moment_money_${momentSeq++}`,
+            timestamp: Math.max(0.2, Math.min(clipDuration - 0.2, seg.relStart + 0.1)),
+            type: 'money',
+            evidence: `Lời thoại nhắc đến tài chính/tiền bạc: "${seg.text.trim()}" (tại ${seg.relStart.toFixed(1)}s)`,
+            confidence: 0.90,
+            status: 'approved',
+          });
+        }
+
+        // 2c. Bonk / Punch: collision / hit / impact keywords
+        if (/\b(đấm|đập|punch|hit|bonk|va chạm|cú đấm|táng|gõ đầu|đập bàn)\b/i.test(text)) {
+          rawMoments.push({
+            id: `moment_impact_${momentSeq++}`,
+            timestamp: Math.max(0.2, Math.min(clipDuration - 0.2, seg.relStart + 0.15)),
+            type: 'impact',
+            evidence: `Hành động va chạm/tác động vật lý trong lời thoại: "${seg.text.trim()}" (tại ${seg.relStart.toFixed(1)}s)`,
+            confidence: 0.88,
+            status: 'approved',
+          });
+        }
+
+        // 2d. Connection lost / glitch: network/loading keywords
+        if (/\b(mất mạng|mất kết nối|đơ|lag|disconnect|loading|đứng hình|mất sóng)\b/i.test(text)) {
+          rawMoments.push({
+            id: `moment_conn_${momentSeq++}`,
+            timestamp: Math.max(0.2, Math.min(clipDuration - 0.2, seg.relStart + 0.1)),
+            type: 'fail',
+            evidence: `Lời thoại đề cập mất kết nối / đứng hình: "${seg.text.trim()}" (tại ${seg.relStart.toFixed(1)}s)`,
+            confidence: 0.90,
+            status: 'approved',
+          });
+        }
+
+        // 2e. Shocked / Surprise reaction
+        if (/\b(sốc|shock|trời ơi|kinh ngạc|wow|không thể tin|kinh dị|hoảng hốt)\b/i.test(text)) {
+          rawMoments.push({
+            id: `moment_shock_${momentSeq++}`,
+            timestamp: Math.max(0.2, Math.min(clipDuration - 0.2, seg.relStart + 0.1)),
+            type: 'surprise',
+            evidence: `Phản ứng bất ngờ / kinh ngạc: "${seg.text.trim()}" (tại ${seg.relStart.toFixed(1)}s)`,
+            confidence: 0.88,
+            status: 'approved',
+          });
+        }
+
+        // 2f. Rizz / Flirt
+        if (/\b(tán|tán gái|thính|rizz|flirt|cua gái|thả thính|ngầu lòi)\b/i.test(text)) {
+          rawMoments.push({
+            id: `moment_rizz_${momentSeq++}`,
+            timestamp: Math.max(0.2, Math.min(clipDuration - 0.2, seg.relStart + 0.1)),
+            type: 'reaction',
+            evidence: `Tình huống tán tỉnh / rizz: "${seg.text.trim()}" (tại ${seg.relStart.toFixed(1)}s)`,
+            confidence: 0.88,
+            status: 'approved',
+          });
+        }
+
+        // 2g. Running away / Chase
+        if (/\b(chạy|chuồn|trốn|đuổi theo|chạy trốn|escape|rượt đuổi|chạy ngay đi)\b/i.test(text)) {
+          rawMoments.push({
+            id: `moment_chase_${momentSeq++}`,
+            timestamp: Math.max(0.2, Math.min(clipDuration - 0.2, seg.relStart + 0.15)),
+            type: 'chase',
+            evidence: `Tình huống rượt đuổi / tháo chạy: "${seg.text.trim()}" (tại ${seg.relStart.toFixed(1)}s)`,
+            confidence: 0.88,
+            status: 'approved',
+          });
+        }
+
+        // 2h. Reveal / Idea
+        if (/\b(nhận ra|bí mật|ý tưởng|thì ra|hóa ra|bật mí|eureka|phát hiện ra)\b/i.test(text)) {
+          rawMoments.push({
+            id: `moment_reveal_${momentSeq++}`,
+            timestamp: Math.max(0.2, Math.min(clipDuration - 0.2, seg.relStart + 0.1)),
+            type: 'reveal',
+            evidence: `Khoảnh khắc phát hiện / bật mí ý tưởng: "${seg.text.trim()}" (tại ${seg.relStart.toFixed(1)}s)`,
+            confidence: 0.86,
+            status: 'approved',
+          });
+        }
+
+        // 2i. Awkward Fail (bruh): placed after speech end in the pause
+        if (/\b(fail|thất bại|toang|hỏng rồi|quê|ngượng|lost|chán thật|bó tay|thua rồi|xong đời|mất rồi)\b/i.test(text)) {
+          // If there is an explicit silence interval starting near or after seg.relEnd, align with silence
+          const matchingSilence = allSilences?.find(
+            (s) => (s.start - candidate.start) >= seg.relEnd - 0.2 && (s.start - candidate.start) <= seg.relEnd + 1.2
+          );
+          const pauseTimestamp = matchingSilence
+            ? Math.round((matchingSilence.start - candidate.start + 0.1) * 10) / 10
+            : Math.min(clipDuration - 0.2, Math.round((seg.relEnd + 0.1) * 10) / 10);
+
+          rawMoments.push({
+            id: `moment_fail_${momentSeq++}`,
+            timestamp: pauseTimestamp,
+            type: 'fail',
+            evidence: `Lời thoại thất bại/ngượng ngùng "${seg.text.trim()}" kết thúc tại ${seg.relEnd.toFixed(1)}s, theo sau là khoảng dừng`,
+            confidence: 0.90,
+            status: 'approved',
+          });
+        }
       }
     }
 
-    // 2. Process semantic beats (surprise, reveal, fail, punchline, pause)
+    // 3. Integrate detected beats (e.g. surprise, reveal, punchline, pause)
     for (const b of detectedBeats) {
-      if (b.type === 'hook') continue; // already handled
-
-      switch (b.type) {
-        case 'surprise': {
-          // Double-SFX support around a strong surprise beat:
-          // A light pre-cue whoosh 0.35s before impact if there's room
-          if (b.confidence > 0.82 && b.timestamp >= 0.7) {
-            addEvent('hook', b.timestamp - 0.35, b.id, 'Âm thanh chuyển động lướt trước phản ứng bất ngờ', 0.55, 0.04, 0.15);
-          }
-          addEvent('surprise', b.timestamp, b.id, `Âm thanh nhấn mạnh phản ứng bất ngờ (${b.reason})`, 0.90, 0.04, 0.25);
-          break;
-        }
-
-        case 'reveal': {
-          addEvent('reveal', b.timestamp, b.id, `Âm thanh chuông báo điểm nhấn tiết lộ: "${b.reason}"`, 0.85, 0.05, 0.3);
-          break;
-        }
-
-        case 'fail': {
-          addEvent('fail', b.timestamp, b.id, `Âm thanh fail / bruh hài hước (${b.reason})`, 0.88, 0.05, 0.3);
-          break;
-        }
-
-        case 'punchline': {
-          if (b.confidence > 0.80 && b.timestamp >= 0.6) {
-            addEvent('hook', b.timestamp - 0.3, b.id, 'Hiệu ứng gia tốc trước điểm rơi punchline', 0.50, 0.04, 0.15);
-          }
-          addEvent('punchline', b.timestamp, b.id, `Âm thanh impact điểm rơi cao trào (${b.reason})`, 0.90, 0.04, 0.3);
-          break;
-        }
-
-        case 'pause': {
-          addEvent('pause', b.timestamp, b.id, `Âm thanh nhấn mạnh khoảng lặng kịch tính (${b.reason})`, 0.70, 0.05, 0.25);
-          break;
-        }
+      if (b.type === 'hook') continue;
+      if (b.type === 'fail' && rawMoments.some((m) => m.type === 'fail')) continue;
+      const hasNearby = rawMoments.some((m) => Math.abs(m.timestamp - b.timestamp) < 0.6);
+      if (!hasNearby) {
+        rawMoments.push({
+          id: `moment_beat_${b.id || momentSeq++}`,
+          timestamp: b.timestamp,
+          type: b.type,
+          evidence: `Nhịp ${b.type} từ bộ dò beat: ${b.reason}`,
+          confidence: Math.max(0.70, b.confidence),
+          status: 'approved',
+        });
       }
     }
 
-    // 3. Scan silences for dramatic pre-reveal cues
+    // 4. Dramatic silence intervals
     if (!isPlaceholder && allSilences?.length > 0) {
       const clipSilences = allSilences
         .filter((s) => s.end > candidate.start && s.start < candidate.end)
@@ -217,29 +291,261 @@ export class AutoAssetPlanner {
         .filter((s) => s.dur >= 0.5 && s.relStart >= 2.0 && s.relEnd <= clipDuration - 2.0);
 
       for (const sil of clipSilences) {
-        // Only add if no SFX already exists near this silence (< 1.5s)
-        const hasNearby = rawEvents.some((e) => Math.abs(e.triggerAt - sil.relEnd) < 1.5);
+        const hasNearby = rawMoments.some((m) => Math.abs(m.timestamp - sil.relEnd) < 1.0);
         if (!hasNearby) {
-          addEvent('reveal', sil.relEnd, undefined, 'Điểm nhấn âm thanh kết thúc khoảng lặng trước câu nói tiếp theo', 0.75, 0.05, 0.25);
+          rawMoments.push({
+            id: `moment_sil_${momentSeq++}`,
+            timestamp: Math.round(sil.relEnd * 10) / 10,
+            type: 'pause',
+            evidence: `Khoảng lặng kịch tính ${sil.dur.toFixed(1)}s trước câu nói tiếp theo`,
+            confidence: 0.75,
+            status: 'approved',
+          });
         }
       }
     }
 
-    // 4. Anti-spam & Contextual Deduplication
-    rawEvents.sort((a, b) => a.triggerAt - b.triggerAt);
-
-    const filtered: PlannedSfxEvent[] = [];
-    for (const evt of rawEvents) {
-      // Don't repeat the exact same asset within 2.0 seconds
-      const tooCloseDuplicate = filtered.some(
-        (prev) => prev.asset.id === evt.asset.id && Math.abs(prev.triggerAt - evt.triggerAt) < 2.0
-      );
-      if (tooCloseDuplicate) continue;
-
-      filtered.push(evt);
+    // Sort chronologically and deduplicate moments too close together (< 0.4s)
+    rawMoments.sort((a, b) => a.timestamp - b.timestamp);
+    const deduplicated: MomentCandidate[] = [];
+    for (const m of rawMoments) {
+      const tooClose = deduplicated.find((prev) => Math.abs(prev.timestamp - m.timestamp) < 0.4);
+      if (!tooClose) {
+        deduplicated.push(m);
+      } else if (m.confidence > tooClose.confidence) {
+        // Replace with higher confidence moment
+        const idx = deduplicated.indexOf(tooClose);
+        deduplicated[idx] = m;
+      }
     }
 
-    return filtered;
+    return deduplicated;
+  }
+
+  /**
+   * AI Sound Selector: Match and score the best SFX from the entire available library
+   * (bundled + imported) based on moment evidence, tags, duration, and pacing.
+   */
+  matchBestSfxForMoment(
+    moment: MomentCandidate,
+    availableSfx: AssetItem[],
+    recentAssigned: Array<{ assetId: string; timestamp: number }> = []
+  ): { asset: AssetItem; reason: string; confidence: number } | null {
+    if (!availableSfx || availableSfx.length === 0) return null;
+
+    let bestScore = -1;
+    let bestAsset: AssetItem | null = null;
+
+    for (const asset of availableSfx) {
+      let score = 10;
+      const tags = (asset.tags || []).map((t) => t.toLowerCase());
+      const cat = (asset.category || '').toLowerCase();
+      const assetName = asset.name.toLowerCase();
+
+      // Category & Tag Affinity
+      switch (moment.type) {
+        case 'money':
+          if (cat === 'cue' || tags.some((t) => ['money', 'cash', 'reward'].includes(t)) || /money|cash/i.test(assetName)) {
+            score += 90;
+          }
+          break;
+        case 'slip':
+          if (tags.some((t) => ['slip', 'fall'].includes(t)) || /slip/i.test(assetName)) {
+            score += 90;
+          } else if (cat === 'comedy') {
+            score += 30;
+          }
+          break;
+        case 'impact':
+          if (tags.some((t) => ['punch', 'bonk', 'impact', 'hit', 'boom'].includes(t)) || /punch|bonk|boom/i.test(assetName)) {
+            score += 85;
+          }
+          break;
+        case 'fail':
+          if (/kết nối|disconnect|loading|lag|đơ/i.test(moment.evidence)) {
+            if (tags.some((t) => ['disconnect', 'glitch', 'fail'].includes(t)) || /connection|lost/i.test(assetName)) {
+              score += 95;
+            }
+          } else {
+            if (tags.some((t) => ['awkward', 'fail', 'bruh'].includes(t)) || /bruh/i.test(assetName)) {
+              score += 90;
+            } else if (cat === 'reaction') {
+              score += 30;
+            }
+          }
+          break;
+        case 'surprise':
+          if (tags.some((t) => ['shock', 'surprise', 'boom'].includes(t)) || /shocked|vine_boom|boom/i.test(assetName)) {
+            score += 85;
+          }
+          break;
+        case 'reaction':
+          if (/rizz|thính|tán/i.test(moment.evidence)) {
+            if (tags.some((t) => ['rizz', 'flirt'].includes(t)) || /rizz/i.test(assetName)) {
+              score += 95;
+            }
+          } else if (cat === 'reaction') {
+            score += 60;
+          }
+          break;
+        case 'chase':
+        case 'comedy':
+          if (/rượt đuổi|chạy|escape/i.test(moment.evidence) || moment.type === 'chase') {
+            if (tags.some((t) => ['escape', 'chase', 'running'].includes(t)) || /running/i.test(assetName)) {
+              score += 95;
+            }
+          } else if (cat === 'comedy' || cat === 'chase') {
+            score += 60;
+          }
+          break;
+        case 'reveal':
+          if (tags.some((t) => ['reveal', 'idea', 'ding', 'ting', 'bell'].includes(t)) || /ding|bell/i.test(assetName)) {
+            score += 90;
+          }
+          break;
+        case 'hook':
+          if (tags.some((t) => ['whoosh', 'transition', 'hook', 'pop'].includes(t)) || /whoosh|pop/i.test(assetName)) {
+            score += 80;
+          }
+          break;
+        case 'pause':
+          if (tags.some((t) => ['pause', 'awkward', 'ting', 'reveal'].includes(t))) {
+            score += 60;
+          }
+          break;
+      }
+
+      // Recency penalty: heavily penalize identical sound within 2.5s
+      const tooRecent = recentAssigned.some(
+        (r) => r.assetId === asset.id && Math.abs(r.timestamp - moment.timestamp) < 2.5
+      );
+      if (tooRecent) {
+        score -= 100;
+      }
+
+      // Review status modifier: unreviewed assets get slight penalty for auto-selection
+      if (asset.reviewStatus === 'needs_review') {
+        score -= 15;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestAsset = asset;
+      }
+    }
+
+    if (!bestAsset) {
+      bestAsset = availableSfx[0];
+    }
+
+    const calculatedConfidence = Math.min(0.98, Math.max(0.50, (moment.confidence + (bestScore > 50 ? 0.05 : -0.1))));
+    const reason = `Đề xuất "${bestAsset.name}" ở ${moment.timestamp.toFixed(1)}s vì ${moment.evidence}`;
+
+    return {
+      asset: bestAsset,
+      reason,
+      confidence: Math.round(calculatedConfidence * 100) / 100,
+    };
+  }
+
+  /**
+   * Generate both multi-SFX timeline events and detailed moment candidates for review
+   */
+  private generateSfxAndMoments(
+    candidate: ClipCandidate,
+    settings: JobSettings,
+    detectedBeats: DetectedBeat[],
+    allSegments: TranscriptSegment[],
+    allSilences: SilenceInterval[]
+  ): { sfxEvents: PlannedSfxEvent[]; suggestedMoments: MomentCandidate[] } {
+    const clipDuration = candidate.duration;
+    const availableSfx = this.assetProvider.getAllAssetsSync('sfx');
+    const detectedMoments = this.detectMoments(candidate, allSegments, allSilences, detectedBeats);
+
+    const suggestedMoments: MomentCandidate[] = [];
+    const rawSfxEvents: PlannedSfxEvent[] = [];
+    const assignedHistory: Array<{ assetId: string; timestamp: number }> = [];
+
+    let seq = 1;
+    for (const moment of detectedMoments) {
+      const match = this.matchBestSfxForMoment(moment, availableSfx, assignedHistory);
+      if (match) {
+        const enrichedMoment: MomentCandidate = {
+          ...moment,
+          suggestedSfx: match.asset,
+          reason: match.reason,
+          confidence: match.confidence,
+        };
+        suggestedMoments.push(enrichedMoment);
+
+        // Convert high-confidence moments into active sfxEvents
+        if (enrichedMoment.confidence >= 0.70 && enrichedMoment.status !== 'rejected') {
+          const trig = Math.max(0, Math.min(clipDuration - 0.1, Math.round(enrichedMoment.timestamp * 10) / 10));
+
+          let vol = 0.85;
+          const cat = enrichedMoment.suggestedSfx?.category;
+          if (cat === 'impact') vol = 0.90;
+          else if (cat === 'cue' || cat === 'reveal') vol = 0.85;
+          else if (cat === 'transition') vol = 0.80;
+
+          rawSfxEvents.push({
+            id: `sfx_${Date.now()}_${seq++}`,
+            asset: enrichedMoment.suggestedSfx!,
+            triggerAt: trig,
+            volume: vol,
+            fadeIn: 0.05,
+            fadeOut: 0.25,
+            enabled: true,
+            origin: 'auto',
+            reason: enrichedMoment.reason,
+          });
+
+          assignedHistory.push({ assetId: match.asset.id, timestamp: trig });
+        }
+      }
+    }
+
+    // Also support double-SFX around strong surprise beats (pre-cue whoosh 0.35s before impact)
+    for (const b of detectedBeats) {
+      if (b.type === 'surprise' && b.confidence >= 0.82 && b.timestamp >= 0.7) {
+        const preCueTime = Math.round((b.timestamp - 0.35) * 10) / 10;
+        const alreadyHasPreCue = rawSfxEvents.some((e) => Math.abs(e.triggerAt - preCueTime) < 0.25);
+        if (!alreadyHasPreCue) {
+          const whooshAsset = availableSfx.find((a) => (a.tags || []).includes('whoosh')) || availableSfx[0];
+          if (whooshAsset) {
+            rawSfxEvents.push({
+              id: `sfx_precue_${Date.now()}_${seq++}`,
+              asset: whooshAsset,
+              triggerAt: preCueTime,
+              volume: 0.60,
+              fadeIn: 0.04,
+              fadeOut: 0.15,
+              enabled: true,
+              sourceBeatId: b.id,
+              origin: 'auto',
+              reason: 'Âm thanh chuyển động lướt trước phản ứng bất ngờ',
+            });
+          }
+        }
+      }
+    }
+
+    // Sort and deduplicate identical sounds too close
+    rawSfxEvents.sort((a, b) => a.triggerAt - b.triggerAt);
+    const finalEvents: PlannedSfxEvent[] = [];
+    for (const evt of rawSfxEvents) {
+      const duplicateTooClose = finalEvents.some(
+        (prev) => prev.asset.id === evt.asset.id && Math.abs(prev.triggerAt - evt.triggerAt) < 2.0
+      );
+      if (!duplicateTooClose) {
+        finalEvents.push(evt);
+      }
+    }
+
+    return {
+      sfxEvents: finalEvents,
+      suggestedMoments,
+    };
   }
 
   /**

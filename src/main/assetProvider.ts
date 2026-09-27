@@ -16,7 +16,16 @@ export class LocalAssetProvider implements AssetProviderInterface {
   private assetCache: Map<string, AssetItem> = new Map();
 
   constructor(customAssetsDir?: string) {
-    this.baseAssetsDir = customAssetsDir || path.resolve(__dirname, '../../assets');
+    if (customAssetsDir && fs.existsSync(customAssetsDir)) {
+      this.baseAssetsDir = customAssetsDir;
+    } else {
+      const candidates = [
+        path.resolve(__dirname, '../assets'),
+        path.resolve(process.cwd(), 'assets'),
+        path.resolve(__dirname, '../../assets'),
+      ];
+      this.baseAssetsDir = candidates.find((c) => fs.existsSync(c)) || candidates[0];
+    }
     this.indexLocalLibrary();
   }
 
@@ -230,8 +239,19 @@ export class LocalAssetProvider implements AssetProviderInterface {
         key = 'sfx_bruh';
         break;
     }
-    const item = this.assetCache.get(key);
-    return item || Array.from(this.assetCache.values()).find((a) => a.type === 'sfx')!;
+    const item = this.assetCache.get(key) || Array.from(this.assetCache.values()).find((a) => a.type === 'sfx');
+    if (item) return item;
+    return {
+      id: key,
+      name: 'Default SFX',
+      type: 'sfx',
+      filePath: path.join(this.baseAssetsDir, 'sfx', 'whoosh.wav'),
+      sourceUrl: `urn:autoclip:sfx:${key}`,
+      license: 'CC0 1.0 Universal',
+      fetchedAt: new Date().toISOString(),
+      fingerprint: 'local',
+      tags: [],
+    };
   }
 
   /**
@@ -259,8 +279,19 @@ export class LocalAssetProvider implements AssetProviderInterface {
         key = 'meme_confused';
         break;
     }
-    const item = this.assetCache.get(key);
-    return item || Array.from(this.assetCache.values()).find((a) => a.type === 'meme')!;
+    const item = this.assetCache.get(key) || Array.from(this.assetCache.values()).find((a) => a.type === 'meme');
+    if (item) return item;
+    return {
+      id: key,
+      name: 'Default Meme',
+      type: 'meme',
+      filePath: path.join(this.baseAssetsDir, 'memes', 'fire_hype.png'),
+      sourceUrl: `urn:autoclip:meme:${key}`,
+      license: 'CC0 1.0 Universal',
+      fetchedAt: new Date().toISOString(),
+      fingerprint: 'local',
+      tags: [],
+    };
   }
 
   /**
@@ -268,7 +299,18 @@ export class LocalAssetProvider implements AssetProviderInterface {
    */
   getMusicForPreset(preset: VideoPreset): AssetItem {
     const key = preset === 'reaction' ? 'music_reaction_upbeat' : 'music_documentary_ambient';
-    const item = this.assetCache.get(key);
-    return item || Array.from(this.assetCache.values()).find((a) => a.type === 'music')!;
+    const item = this.assetCache.get(key) || Array.from(this.assetCache.values()).find((a) => a.type === 'music');
+    if (item) return item;
+    return {
+      id: key,
+      name: preset === 'reaction' ? 'Upbeat Groovy Rhythm Trap' : 'Cinematic Ambient Story Bed',
+      type: 'music',
+      filePath: path.join(this.baseAssetsDir, 'music', preset === 'reaction' ? 'reaction_upbeat.wav' : 'documentary_ambient.wav'),
+      sourceUrl: `urn:autoclip:music:${key}`,
+      license: 'CC0 1.0 Universal',
+      fetchedAt: new Date().toISOString(),
+      fingerprint: 'local',
+      tags: [],
+    };
   }
 }

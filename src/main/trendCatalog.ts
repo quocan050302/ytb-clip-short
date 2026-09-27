@@ -35,7 +35,7 @@ export class TrendCatalog {
         source: 'Open Sound Index (Curated Trends)',
         detectedDate: '2026-09-20',
         usageRights: 'CC0 Permissive / Royalty-Free Clean',
-        verifiedPlayable: fs.existsSync(reactionMusic.filePath),
+        verifiedPlayable: Boolean(reactionMusic?.filePath && fs.existsSync(reactionMusic.filePath)),
         asset: reactionMusic,
       },
       {
@@ -45,7 +45,7 @@ export class TrendCatalog {
         source: 'Open Acoustic Archive',
         detectedDate: '2026-09-18',
         usageRights: 'CC0 Permissive / Royalty-Free Clean',
-        verifiedPlayable: fs.existsSync(docMusic.filePath),
+        verifiedPlayable: Boolean(docMusic?.filePath && fs.existsSync(docMusic.filePath)),
         asset: docMusic,
       },
       {

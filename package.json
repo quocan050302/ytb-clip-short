@@ -1,0 +1,41 @@
+{
+  "name": "autoclip-studio",
+  "version": "1.0.0",
+  "description": "AutoClip Studio - AI Video Shorts Generator powered by Hypit Video Engine",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "npm run build && electron .",
+    "start": "electron .",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.node.json",
+    "build": "npm run build:renderer && npm run build:electron",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit"
+  },
+  "keywords": [
+    "video",
+    "shorts",
+    "hypit",
+    "electron",
+    "react",
+    "editor"
+  ],
+  "author": "AutoClip Studio Team",
+  "license": "MIT",
+  "dependencies": {
+    "lucide-react": "^1.16.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.1",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}

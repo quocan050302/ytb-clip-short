@@ -97,6 +97,11 @@ export const OutputGallery: React.FC<OutputGalleryProps> = ({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {completedClips.map((clip) => {
             const isSelected = activeClip?.id === clip.id;
+            const isHD = clip.outputPath ? /_hd\.mp4$/i.test(clip.outputPath) : false;
+            const hasRealCaptions = job.transcript.some(
+              (s) => !s.isPlaceholder && !/^\[Đoạn nói \d+\]/i.test(s.text)
+            );
+
             return (
               <div
                 key={clip.id}
@@ -129,9 +134,55 @@ export const OutputGallery: React.FC<OutputGalleryProps> = ({
                     <Play size={16} style={{ marginLeft: 2 }} />
                   </div>
                   <div>
-                    <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>{clip.title}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: '0.95rem', fontWeight: 600 }}>{clip.title}</span>
+                      {isHD && (
+                        <span
+                          className="badge"
+                          style={{
+                            background: 'rgba(245, 158, 11, 0.2)',
+                            color: '#FBBF24',
+                            border: '1px solid rgba(245, 158, 11, 0.4)',
+                            fontWeight: 700,
+                            fontSize: '0.68rem',
+                            padding: '2px 7px',
+                          }}
+                        >
+                          HD
+                        </span>
+                      )}
+                      {!hasRealCaptions && (
+                        <span
+                          className="badge"
+                          style={{
+                            background: 'rgba(148, 163, 184, 0.15)',
+                            color: '#94A3B8',
+                            border: '1px solid rgba(148, 163, 184, 0.3)',
+                            fontSize: '0.68rem',
+                            padding: '2px 7px',
+                          }}
+                        >
+                          No real captions
+                        </span>
+                      )}
+                      {clip.hdEnhanceFailed && (
+                        <span
+                          className="badge"
+                          style={{
+                            background: 'rgba(239, 68, 68, 0.15)',
+                            color: '#F87171',
+                            border: '1px solid rgba(239, 68, 68, 0.3)',
+                            fontSize: '0.68rem',
+                            padding: '2px 7px',
+                          }}
+                        >
+                          HD enhance failed, using normal render
+                        </span>
+                      )}
+                    </div>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: 2 }}>
                       {clip.duration ? `${clip.duration.toFixed(0)} giây` : ''} • MP4 (H.264/AAC)
+                      {clip.renderEngine ? ` • Engine: ${clip.renderEngine}` : ''}
                     </div>
                   </div>
                 </div>

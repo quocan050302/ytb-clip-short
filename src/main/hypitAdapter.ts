@@ -8,7 +8,11 @@ import {
   ClipCandidate,
   TranscriptSegment,
   ClipAssetPlan,
+  ClipEditPlan,
+  RenderedClip,
 } from './types';
+import { renderWithEditPlan, RenderResult } from './renderEngine';
+import { enhanceVideo } from './videoEnhancer';
 
 export class HypitAdapter {
   private cachedHypitPath: string | null = null;
@@ -689,11 +693,19 @@ ${memeItems}  </media-track:Track>
     }
 
     // Burn-in styled subtitles if enabled
-    if (settings.captions && relevantSegments.length > 0) {
-      const assPath = path.join(projectDir, `captions_${clipId}.ass`);
-      generateAssSubtitles(assPath, relevantSegments, candidate.start, settings.preset);
-      vfChains.push(`[${currentVLabel}]subtitles=${assPath.replace(/:/g, '\\:')}[v_sub]`);
-      currentVLabel = 'v_sub';
+    if (settings.captions) {
+      const realSegments = relevantSegments.filter(
+        (s) => !s.isPlaceholder && !/^\[Đoạn nói \d+\]/i.test(s.text)
+      );
+
+      if (realSegments.length === 0) {
+        onLog(`[${clipId}] Không có transcript thật, captions đã được bỏ qua.`);
+      } else {
+        const assPath = path.join(projectDir, `captions_${clipId}.ass`);
+        generateAssSubtitles(assPath, realSegments, candidate.start, settings.preset);
+        vfChains.push(`[${currentVLabel}]subtitles=${assPath.replace(/:/g, '\\:')}[v_sub]`);
+        currentVLabel = 'v_sub';
+      }
     }
 
     // Overlay Memes at exact beat timestamps
@@ -811,6 +823,130 @@ ${memeItems}  </media-track:Track>
   }
 
   /**
+   * New render path: uses ClipEditPlan + renderEngine + videoEnhancer.
+   * Returns { outputPath, engine, enhancedPath? }
+   */
+  async renderClipWithEditPlan(
+    clipId: string,
+    projectDir: string,
+    candidate: ClipCandidate,
+    settings: JobSettings,
+    sourceVideoPath: string,
+    outputPath: string,
+    editPlan: ClipEditPlan,
+    relevantSegments: TranscriptSegment[],
+    onProgress: (percent: number, phase: string) => void,
+    onLog: (msg: string) => void
+  ): Promise<{ outputPath: string; engine: 'hypit' | 'ffmpeg-fallback'; enhancedPath?: string; hdEnhanceFailed?: boolean }> {
+    const ffmpegPath = await this.getFfmpegPath();
+    const ffprobePath = await this.getFfprobePath();
+    const hypitPath = await this.getHypitPath();
+
+    onProgress(5, 'Cắt A-roll segment...');
+    const cutSubclipPath = path.join(projectDir, `aroll_cut_${clipId}.mp4`);
+    await this.cutSegment(sourceVideoPath, candidate.start, candidate.end, cutSubclipPath);
+
+    // Try Hypit first
+    let hypitBase: string | null = null;
+    try {
+      onProgress(20, 'Thử Hypit build engine...');
+      const { svrunPath } = this.generateProject(
+        projectDir, candidate, settings, cutSubclipPath, relevantSegments
+      );
+      const planRes = await runSpawn(hypitPath, [
+        'plan', 'build.svrun', '--workspace', projectDir, '--json'
+      ]).promise;
+
+      if (planRes.code === 0) {
+        const buildSpawn = runSpawn(hypitPath, [
+          'build', 'build.svrun', '--workspace', projectDir, '--follow', '--json'
+        ], { onStdout: (c) => onLog(`[Hypit] ${c.trim()}`) });
+        this.activeRuns.set(clipId, buildSpawn.cancel);
+        const buildRes = await buildSpawn.promise;
+        this.activeRuns.delete(clipId);
+
+        if (buildRes.code === 0) {
+          const data = JSON.parse(buildRes.stdout.trim() || '{}');
+          const buildId = data.build?.id;
+          if (buildId && data.build?.result?.state === 'complete') {
+            const hypitOut = path.join(projectDir, 'hypit_base.mp4');
+            const getRes = await runSpawn(hypitPath, [
+              'get', buildId, '--output', 'final.video',
+              '--to', hypitOut, '--workspace', projectDir, '--json'
+            ]).promise;
+            if (getRes.code === 0 && fs.existsSync(hypitOut)) {
+              hypitBase = hypitOut;
+              onLog(`[${clipId}] Hypit build thành công (engine: hypit)`);
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      onLog(`[${clipId}] Hypit không khả dụng: ${err.message} – chuyển sang ffmpeg-fallback`);
+    }
+
+    // Use hypit base or cut subclip as input to render engine
+    const renderInput = hypitBase ?? cutSubclipPath;
+    const renderEngine = hypitBase ? 'hypit' : 'ffmpeg-fallback';
+
+    const renderResult = await renderWithEditPlan({
+      clipId,
+      projectDir,
+      candidate,
+      settings,
+      cutVideoPath: renderInput,
+      outputPath,
+      editPlan,
+      relevantSegments,
+      ffmpegPath,
+      ffprobePath,
+      onProgress,
+      onLog,
+    });
+
+    onLog(`[${clipId}] Render engine: ${renderResult.engine} | Duration: ${renderResult.duration.toFixed(2)}s`);
+
+    // Post-render HD enhance: if settings.hdEnhance === true, enhance before completing
+    let finalOutputPath = renderResult.outputPath;
+    let enhancedPath: string | undefined;
+    let hdEnhanceFailed = false;
+
+    if (settings.hdEnhance) {
+      const mode = settings.enhanceMode || editPlan.enhance?.mode || 'blur-bg-preserve';
+      onProgress(92, `HD Enhance (${mode})...`);
+      const enhOut = outputPath.replace(/\.mp4$/i, '_HD.mp4');
+      try {
+        const enhResult = await enhanceVideo({
+          inputPath: renderResult.outputPath,
+          outputPath: enhOut,
+          settings: {
+            mode,
+            blurRadius: editPlan.enhance?.blurRadius ?? 40,
+            sharpen: true,
+          },
+          isVertical: true,
+          ffmpegPath,
+          ffprobePath,
+          onLog,
+          onProgress: (p, ph) => onProgress(92 + Math.round(p * 0.07), ph),
+        });
+
+        if (!enhResult.skipped && fs.existsSync(enhResult.outputPath)) {
+          enhancedPath = enhResult.outputPath;
+          finalOutputPath = enhResult.outputPath;
+          for (const w of enhResult.warnings) onLog(`[VideoEnhancer] WARN: ${w}`);
+        }
+      } catch (enhErr: any) {
+        hdEnhanceFailed = true;
+        onLog(`[VideoEnhancer] WARN: HD enhance failed, using normal render: ${enhErr.message}`);
+      }
+    }
+
+    onProgress(100, 'Hoàn tất');
+    return { outputPath: finalOutputPath, engine: renderResult.engine, enhancedPath, hdEnhanceFailed };
+  }
+
+  /**
    * Cancel an ongoing render
    */
   cancelRender(clipId: string): void {
@@ -849,15 +985,21 @@ Style: Default,Arial,60,${primaryColor},&H000000FF,${outlineColor},&H80000000,1,
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
+  const validSegments = segments.filter(
+    (s) => !s.isPlaceholder && !/^\[Đoạn nói \d+\]/i.test(s.text)
+  );
+  if (validSegments.length === 0) return;
+
   const events: string[] = [];
 
-  for (const seg of segments) {
+  for (const seg of validSegments) {
     const relStart = Math.max(0, seg.start - clipStartTime);
     const relEnd = Math.max(relStart + 0.5, seg.end - clipStartTime);
 
     const startStr = formatAssTime(relStart);
     const endStr = formatAssTime(relEnd);
     const cleanText = seg.text.replace(/[\r\n]+/g, ' ').trim();
+    if (!cleanText) continue;
 
     events.push(`Dialogue: 0,${startStr},${endStr},Default,,0,0,0,,${cleanText}`);
   }

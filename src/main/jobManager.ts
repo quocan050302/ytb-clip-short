@@ -4,9 +4,13 @@ import os from 'os';
 import {
   ClipAssetPlan,
   ClipCandidate,
+  ClipEditPlan,
+  DuckingSettings,
+  EnhanceSettings,
   JobMetadata,
   JobSettings,
   LogEntry,
+  MomentEvent,
   RenderedClip,
   TranscriptSegment,
   VideoInfo,
@@ -14,6 +18,9 @@ import {
 import { HypitAdapter } from './hypitAdapter';
 import { VideoAnalyzer } from './videoAnalyzer';
 import { AutoAssetPlanner } from './autoAssetPlanner';
+import { MomentPlanner } from './momentPlanner';
+import { loadSpeechTimeline, filterAndRemapSegments } from './speechTimeline';
+import { enhanceVideo } from './videoEnhancer';
 
 export class JobManager {
   private baseJobsDir: string;
@@ -21,6 +28,7 @@ export class JobManager {
   private hypitAdapter: HypitAdapter;
   private videoAnalyzer: VideoAnalyzer;
   private autoAssetPlanner: AutoAssetPlanner;
+  private momentPlanner: MomentPlanner;
   private onJobUpdatedCallback?: (job: JobMetadata) => void;
 
   constructor(customJobsDir?: string) {
@@ -35,6 +43,7 @@ export class JobManager {
     this.hypitAdapter = new HypitAdapter();
     this.videoAnalyzer = new VideoAnalyzer();
     this.autoAssetPlanner = new AutoAssetPlanner();
+    this.momentPlanner = new MomentPlanner();
     this.loadAllJobs();
   }
 
@@ -197,15 +206,20 @@ export class JobManager {
       const silences = await this.videoAnalyzer.detectSilence(job.sourceVideoPath);
       this.addLog(jobId, 'info', `Phát hiện ${silences.length} điểm ngắt khoảng lặng.`);
 
-      // 2. Handle transcript
+      // 2. Handle transcript with SpeechTimeline
+      const speechResult = loadSpeechTimeline(undefined, srtContent ?? '');
+      for (const w of speechResult.warnings) {
+        this.addLog(jobId, speechResult.hasWordTiming ? 'info' : 'warn', w);
+      }
+
       let segments: TranscriptSegment[] = [];
-      if (srtContent && srtContent.trim()) {
-        this.addLog(jobId, 'info', 'Đọc nội dung file phụ đề SRT được cung cấp...');
-        segments = this.videoAnalyzer.parseSrt(srtContent);
-        // Save SRT
-        fs.writeFileSync(path.join(job.jobDir, 'transcript', 'subtitles.srt'), srtContent, 'utf8');
+      if (speechResult.segments.length > 0) {
+        segments = speechResult.segments;
+        this.addLog(jobId, 'info', `SpeechTimeline: ${segments.length} segments, word-timing: ${speechResult.hasWordTiming}`);
+        fs.writeFileSync(path.join(job.jobDir, 'transcript', 'subtitles.srt'), srtContent ?? '', 'utf8');
       } else {
-        this.addLog(jobId, 'info', 'Không có SRT tải lên: tự động sinh mốc phân đoạn theo nhịp nói và khoảng lặng cục bộ...');
+        this.addLog(jobId, 'info', 'Không có SRT tải lên: tự động sinh mốc phân đoạn theo nhịp nói và khoảng lặng...');
+        this.addLog(jobId, 'warn', 'Không có transcript thật, captions đã được bỏ qua.');
         segments = this.videoAnalyzer.generateSilenceBasedTranscript(
           job.videoInfo.duration,
           silences
@@ -228,7 +242,7 @@ export class JobManager {
         job.settings
       );
 
-      // 4. Auto Asset Planning for all candidates (Hook/Surprise/Reveal/Fail/Punchline + Meme & SFX sync + Ducking BGM)
+      // 4. Auto Asset Planning (legacy beats + BGM)
       this.addLog(jobId, 'info', 'Khởi chạy Auto Asset Planner: quét nhịp (hook/surprise/reveal/fail/punchline) & tự động đồng bộ Meme + SFX + BGM Ducking...');
       candidates = this.autoAssetPlanner.planAll(
         candidates,
@@ -237,8 +251,15 @@ export class JobManager {
         silences
       );
 
-      // 5. Extract thumbnails for each candidate
-      this.addLog(jobId, 'info', 'Trích xuất thumbnail khung hình cho các đoạn đề xuất...');
+      // 5. Build ClipEditPlan for each candidate
+      this.addLog(jobId, 'info', 'Xây dựng ClipEditPlan (MomentPlanner + TextOverlays + VisualOverlays + Effects)...');
+      candidates = candidates.map((cand) => ({
+        ...cand,
+        editPlan: this.buildEditPlan(cand, job.settings, segments, silences, speechResult.hasWordTiming, speechResult.warnings),
+      }));
+
+      // 6. Extract thumbnails
+      this.addLog(jobId, 'info', 'Trích xuất thumbnail kháung hình cho các đoạn đề xuất...');
       const timestamps = candidates.map((c) => c.start + Math.min(2, c.duration / 2));
       const thumbsDir = path.join(job.jobDir, 'candidates', 'thumbnails');
       const thumbPaths = await this.hypitAdapter.extractThumbnails(
@@ -248,9 +269,7 @@ export class JobManager {
       );
 
       for (let i = 0; i < candidates.length; i++) {
-        if (thumbPaths[i]) {
-          candidates[i].thumbnailPath = thumbPaths[i];
-        }
+        if (thumbPaths[i]) candidates[i].thumbnailPath = thumbPaths[i];
       }
 
       job.candidates = candidates;
@@ -261,7 +280,7 @@ export class JobManager {
       );
 
       job.status = 'candidates_ready';
-      this.addLog(jobId, 'info', `Đã tìm thấy ${candidates.length} đoạn shorts tiềm năng và hoàn tất Auto Asset Plan! Sẵn sàng duyệt.`);
+      this.addLog(jobId, 'info', `Đã tìm thấy ${candidates.length} đoạn shorts tiềm năng và hoàn tất Auto Asset Plan + ClipEditPlan! Sẵn sàng duyệt.`);
       this.notifyUpdate(job);
       return job;
     } catch (err: any) {
@@ -270,6 +289,140 @@ export class JobManager {
       this.notifyUpdate(job);
       throw err;
     }
+  }
+
+  /**
+   * Build a ClipEditPlan from a candidate using MomentPlanner + AutoAssetPlanner.
+   * Converts AssetPlan beats → AudioEventPlan + VisualOverlayPlan.
+   * Generates TextOverlayPlan from transcript segments.
+   */
+  private buildEditPlan(
+    candidate: ClipCandidate,
+    settings: JobSettings,
+    allSegments: TranscriptSegment[],
+    silences: Array<{ start: number; end: number }>,
+    hasWordTiming: boolean,
+    warnings: string[]
+  ): ClipEditPlan {
+    const clipDur = candidate.duration;
+    const clipStart = candidate.start;
+    const clipEnd = candidate.end;
+
+    // Filter & remap segments to clip-relative
+    const clipSegments: TranscriptSegment[] = filterAndRemapSegments(allSegments, clipStart, clipEnd);
+
+    // Remap silences to clip-relative
+    const clipSilences = silences
+      .map((s) => ({ start: Math.max(0, s.start - clipStart), end: Math.min(clipDur, s.end - clipStart) }))
+      .filter((s) => s.end > s.start && s.start < clipDur);
+
+    // Detect moments
+    const moments = this.momentPlanner.detectMoments(clipSegments, clipSilences, clipDur);
+
+    // Enhance settings: wire settings.hdEnhance + settings.enhanceMode
+    const enhanceMode = settings.hdEnhance
+      ? (settings.enhanceMode ?? 'blur-bg-preserve')
+      : (settings.enhance?.mode ?? 'none');
+
+    const enhance: EnhanceSettings = {
+      mode: enhanceMode,
+      targetResolution: settings.enhance?.targetResolution ?? '1080p',
+      faceAware: settings.enhance?.faceAware ?? false,
+      blurRadius: settings.enhance?.blurRadius ?? 40,
+      upscaleFactor: settings.enhance?.upscaleFactor ?? 2,
+      sharpen: settings.enhance?.sharpen ?? true,
+    };
+
+    // Default ducking from assetPlan or hardcoded
+    const duckingSettings: DuckingSettings = candidate.assetPlan?.duckingSettings ?? {
+      normalVolume: 0.35,
+      duckedVolume: 0.12,
+      fadeInDuration: 0.5,
+      fadeOutDuration: 1.0,
+    };
+
+    // Build TextOverlayPlan from caption segments (filter out placeholders!)
+    const realClipSegments = clipSegments.filter(
+      (s) => !s.isPlaceholder && !/^\[Đoạn nói \d+\]/i.test(s.text)
+    );
+
+    const textOverlays = realClipSegments.map((seg, i) => ({
+      id: `text_${i}`,
+      text: seg.text,
+      start: seg.start,
+      end: seg.end,
+      style: 'caption' as const,
+      color: '#FFFFFF',
+      fontSize: 72,
+      xNorm: 0.5,
+      yNorm: 0.82,
+      animation: 'fade' as const,
+    }));
+
+    // Build VisualOverlayPlan from assetPlan beats
+    const visualOverlays = (candidate.assetPlan?.beats ?? []).map((beat, i) => ({
+      id: `visual_${i}`,
+      type: 'meme-image' as const,
+      assetPath: beat.meme?.filePath ?? '',
+      start: beat.timestamp,
+      end: Math.min(clipDur, beat.timestamp + beat.duration),
+      xNorm: 0.5 - 0.15,
+      yNorm: 0.12,
+      widthNorm: 0.30,
+      heightNorm: 0.20,
+      opacity: 0.92,
+      momentId: moments.find((m) => Math.abs(m.timestamp - beat.timestamp) < 1.5)?.id,
+    })).filter((v) => v.assetPath);
+
+    // Build AudioEventPlan from assetPlan beats (SFX)
+    const audioEvents = (candidate.assetPlan?.beats ?? []).map((beat, i) => ({
+      id: `audio_${i}`,
+      type: 'sfx' as const,
+      assetPath: beat.sfx?.filePath ?? '',
+      triggerAt: beat.timestamp,
+      volume: 0.85,
+      fadeIn: 0.05,
+      fadeOut: 0.3,
+      momentId: moments.find((m) => Math.abs(m.timestamp - beat.timestamp) < 1.5)?.id,
+    })).filter((a) => a.assetPath);
+
+    // Build EffectPlan from high-confidence moments
+    const effects = moments
+      .filter((m) => ['hook', 'surprise', 'punchline', 'fail'].includes(m.momentType) && m.confidence > 0.70)
+      .map((m, i) => ({
+        id: `eff_${i}`,
+        effect: (m.momentType === 'surprise' || m.momentType === 'fail' ? 'zoom-punch' : 'flash') as any,
+        start: m.timestamp,
+        end: Math.min(clipDur, m.timestamp + Math.min(0.4, m.duration)),
+        intensity: m.confidence * 0.6,
+        momentId: m.id,
+      }));
+
+    const editWarnings = [...warnings];
+    if (realClipSegments.length === 0) {
+      editWarnings.push('Không có transcript thật, captions đã được bỏ qua.');
+    }
+    if (!hasWordTiming) {
+      editWarnings.push(
+        'No SRT/WhisperX word-level timing – word-level captions DISABLED. ' +
+        'Upload a .srt or whisperx.json for animated word captions.'
+      );
+    }
+
+    return {
+      clipId: candidate.id,
+      moments,
+      textOverlays,
+      visualOverlays,
+      effects: settings.visualEffects ? effects : [],
+      audioEvents,
+      musicTrack: candidate.assetPlan?.musicTrack ?? null,
+      duckingSettings,
+      legacyAssetPlan: candidate.assetPlan,
+      enhance,
+      hasWordTiming,
+      warnings: editWarnings,
+    };
   }
 
   /**
@@ -403,30 +556,112 @@ export class JobManager {
       clip.status = 'rendering';
       this.notifyUpdate(job);
 
-      const finalPath = await this.hypitAdapter.renderClip(
-        clipId,
-        projectDir,
-        candidate,
-        job.settings,
-        job.sourceVideoPath,
-        outputPath,
-        relevantSegs,
-        (percent, phase) => {
-          clip!.progress = percent;
-          clip!.updatedAt = new Date().toISOString();
-          this.addLog(jobId, 'info', `[${clipId}] ${percent}% - ${phase}`, clipId);
-          this.notifyUpdate(job);
-        },
-        (msg) => {
-          this.addLog(jobId, 'info', msg, clipId);
+      let finalPath: string;
+      let renderEngine: 'hypit' | 'ffmpeg-fallback' = 'ffmpeg-fallback';
+      let enhancedPath: string | undefined;
+
+      if (candidate.editPlan) {
+        // New path: use ClipEditPlan + renderEngine + videoEnhancer
+        const result = await this.hypitAdapter.renderClipWithEditPlan(
+          clipId,
+          projectDir,
+          candidate,
+          job.settings,
+          job.sourceVideoPath,
+          outputPath,
+          candidate.editPlan,
+          relevantSegs,
+          (percent, phase) => {
+            clip!.progress = percent;
+            clip!.updatedAt = new Date().toISOString();
+            this.addLog(jobId, 'info', `[${clipId}] ${percent}% - ${phase}`, clipId);
+            this.notifyUpdate(job);
+          },
+          (msg) => {
+            this.addLog(jobId, 'info', msg, clipId);
+          }
+        );
+        finalPath = result.outputPath;
+        renderEngine = result.engine;
+        enhancedPath = result.enhancedPath;
+        if (result.hdEnhanceFailed) {
+          clip.hdEnhanceFailed = true;
+          this.addLog(jobId, 'warn', `[${clipId}] HD enhance failed, using normal render`, clipId);
         }
-      );
+      } else {
+        // Legacy path: backward compat with old renderClip
+        finalPath = await this.hypitAdapter.renderClip(
+          clipId,
+          projectDir,
+          candidate,
+          job.settings,
+          job.sourceVideoPath,
+          outputPath,
+          relevantSegs,
+          (percent, phase) => {
+            clip!.progress = percent;
+            clip!.updatedAt = new Date().toISOString();
+            this.addLog(jobId, 'info', `[${clipId}] ${percent}% - ${phase}`, clipId);
+            this.notifyUpdate(job);
+          },
+          (msg) => {
+            this.addLog(jobId, 'info', msg, clipId);
+          }
+        );
+
+        if (job.settings.hdEnhance) {
+          try {
+            const enhOut = outputPath.replace(/\.mp4$/i, '_HD.mp4');
+            const enhResult = await enhanceVideo({
+              inputPath: finalPath,
+              outputPath: enhOut,
+              settings: {
+                mode: job.settings.enhanceMode ?? 'blur-bg-preserve',
+                blurRadius: 40,
+                sharpen: true,
+              },
+              isVertical: true,
+              ffmpegPath: await this.hypitAdapter.getFfmpegPath(),
+              ffprobePath: await this.hypitAdapter.getFfprobePath(),
+              onLog: (m: string) => this.addLog(jobId, 'info', m, clipId),
+              onProgress: () => {},
+            });
+            if (!enhResult.skipped && fs.existsSync(enhResult.outputPath)) {
+              enhancedPath = enhResult.outputPath;
+              finalPath = enhResult.outputPath;
+            }
+          } catch (enhErr: any) {
+            clip.hdEnhanceFailed = true;
+            this.addLog(jobId, 'warn', `[${clipId}] HD enhance failed, using normal render`, clipId);
+          }
+        }
+      }
+
+      // Acceptance criterion 5: Clip only completed when final MP4 exists and is playable
+      if (!fs.existsSync(finalPath) || fs.statSync(finalPath).size === 0) {
+        throw new Error(`File MP4 xuất bản không tồn tại hoặc bị lỗi: ${finalPath}`);
+      }
+
+      try {
+        const probeCheck = await this.hypitAdapter.probeMedia(finalPath);
+        if (probeCheck.duration <= 0) {
+          throw new Error(`File MP4 có thời lượng không hợp lệ (${probeCheck.duration}s)`);
+        }
+      } catch (probeErr: any) {
+        throw new Error(`File MP4 không thể phát được (ffprobe validation error): ${probeErr.message}`);
+      }
 
       clip.status = 'completed';
       clip.progress = 100;
       clip.outputPath = finalPath;
+      clip.renderEngine = renderEngine;
+      clip.enhancedPath = enhancedPath;
       clip.updatedAt = new Date().toISOString();
-      this.addLog(jobId, 'info', `[${clipId}] Dựng thành công! File xuất: ${finalPath}`, clipId);
+      this.addLog(
+        jobId, 'info',
+        `[${clipId}] Dựng thành công (engine: ${renderEngine})! File xuất: ${finalPath}${enhancedPath ? ' | HD: ' + enhancedPath : ''}`,
+        clipId
+      );
       this.notifyUpdate(job);
       return clip;
     } catch (err: any) {

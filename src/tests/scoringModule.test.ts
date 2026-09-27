@@ -53,4 +53,18 @@ describe('StandardScoringModule', () => {
     expect(result.scoreBreakdown.payoff).toBeLessThanOrEqual(55);
     expect(result.reason).toContain('cần rà soát lại điểm ngắt');
   });
+
+  it('does NOT use placeholder text in transcriptExcerpt or reasons when segments are generated from silence', () => {
+    const segments: TranscriptSegment[] = [
+      { id: 'seg_1', start: 0.0, end: 12.0, text: '[Đoạn nói 1] (12.0s)', isPlaceholder: true },
+      { id: 'seg_2', start: 13.0, end: 30.0, text: '[Đoạn nói 2] (17.0s)', isPlaceholder: true },
+    ];
+    const silences = [{ start: 12.0, end: 13.0 }];
+
+    const result = scoring.evaluateCandidate(0, 30, segments, silences);
+
+    expect(result.transcriptExcerpt).not.toContain('[Đoạn nói');
+    expect(result.transcriptExcerpt).toBe('(Không có phụ đề - cắt theo nhịp âm thanh)');
+    expect(result.reason).not.toContain('[Đoạn nói');
+  });
 });

@@ -123,6 +123,7 @@ export class VideoAnalyzer {
           start: Math.round(curTime * 100) / 100,
           end: Math.round(s.start * 100) / 100,
           text: `[Đoạn nói ${segments.length + 1}] (${(s.start - curTime).toFixed(1)}s)`,
+          isPlaceholder: true,
         });
       }
       curTime = s.end;
@@ -134,6 +135,7 @@ export class VideoAnalyzer {
         start: Math.round(curTime * 100) / 100,
         end: Math.round(totalDuration * 100) / 100,
         text: `[Đoạn nói ${segments.length + 1}] (${(totalDuration - curTime).toFixed(1)}s)`,
+        isPlaceholder: true,
       });
     }
 

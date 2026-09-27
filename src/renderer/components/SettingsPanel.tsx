@@ -139,7 +139,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               disabled={disabled}
             />
             <Type size={15} color="var(--accent-primary)" />
-            Tự động tạo phụ đề (Captions)
+            Phụ đề (Captions - Cần file SRT/WhisperX)
           </label>
 
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.85rem' }}>
@@ -174,7 +174,68 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <Film size={15} color="var(--status-success)" />
             Chèn B-Roll / Minh họa có sẵn
           </label>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.85rem' }}>
+            <input
+              type="checkbox"
+              checked={!!settings.hdEnhance}
+              onChange={(e) => update('hdEnhance', e.target.checked)}
+              disabled={disabled}
+            />
+            <Sparkles size={15} color="#F59E0B" />
+            <span style={{ fontWeight: 600, color: settings.hdEnhance ? '#FBBF24' : 'inherit' }}>
+              Nâng short lên HD
+            </span>
+          </label>
         </div>
+
+        {/* HD Enhance Mode Options when enabled */}
+        {settings.hdEnhance && (
+          <div
+            style={{
+              marginTop: 14,
+              padding: '12px 16px',
+              background: 'rgba(245, 158, 11, 0.08)',
+              border: '1px solid rgba(245, 158, 11, 0.25)',
+              borderRadius: 'var(--radius-md)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#FCD34D' }}>
+                ✨ Chế độ Nâng Cấp HD (Xuất chuẩn 1080x1920 _HD.mp4):
+              </span>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                Tất cả các mode đều validate 1080x1920 sau render
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {[
+                { mode: 'blur-bg-preserve', label: 'Blur BG Preserve (Khuyên dùng)', desc: 'Làm mờ nền 1080x1920 + giữ sắc nét chủ thể' },
+                { mode: 'smart-crop-hd', label: 'Smart Crop HD', desc: 'Crop dọc 1080x1920 bằng Lanczos + Unsharp' },
+                { mode: 'ai-upscale-local', label: 'AI Upscale Local', desc: 'Lanczos HD cục bộ (CRF 18, 1080x1920)' },
+              ].map((opt) => (
+                <button
+                  key={opt.mode}
+                  type="button"
+                  className={`btn btn-sm ${
+                    (settings.enhanceMode || 'blur-bg-preserve') === opt.mode
+                      ? 'btn-primary'
+                      : 'btn-secondary'
+                  }`}
+                  style={{ flex: 1, minWidth: 200, textAlign: 'left', padding: '8px 12px' }}
+                  onClick={() => update('enhanceMode', opt.mode as any)}
+                  disabled={disabled}
+                >
+                  <div style={{ fontWeight: 600, fontSize: '0.8rem' }}>{opt.label}</div>
+                  <div style={{ fontSize: '0.7rem', opacity: 0.8, marginTop: 2 }}>{opt.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Mode Guarantee info */}

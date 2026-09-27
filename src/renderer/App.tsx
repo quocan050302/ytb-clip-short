@@ -34,6 +34,19 @@ export const App: React.FC = () => {
     sfx: true,
     broll: true,
     mode: 'local',
+    wordLevelCaptions: true,
+    callouts: false,
+    visualEffects: true,
+    hdEnhance: true,
+    enhanceMode: 'blur-bg-preserve',
+    enhance: {
+      mode: 'blur-bg-preserve',
+      targetResolution: '1080p',
+      faceAware: false,
+      blurRadius: 40,
+      upscaleFactor: 2,
+      sharpen: true,
+    },
   });
 
   // Current active job

@@ -160,6 +160,20 @@ export const RenderProgress: React.FC<RenderProgressProps> = ({
                   ({clip.duration.toFixed(0)}s)
                 </span>
               )}
+              {clip.hdEnhanceFailed && (
+                <span
+                  className="badge"
+                  style={{
+                    background: 'rgba(239, 68, 68, 0.15)',
+                    color: '#F87171',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    fontSize: '0.72rem',
+                    padding: '2px 8px',
+                  }}
+                >
+                  HD enhance failed, using normal render
+                </span>
+              )}
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

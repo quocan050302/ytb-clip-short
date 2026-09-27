@@ -52,6 +52,9 @@ export class BeatDetector {
 
     // 2. SCAN TRANSCRIPT & SILENCE FOR SURPRISE, REVEAL, FAIL, PAUSE
     for (const seg of segments) {
+      // Never use placeholder segments for semantic beats
+      if (seg.isPlaceholder || /^\[Đoạn nói \d+\]/i.test(seg.text)) continue;
+
       // Avoid beats too close to the start (< 2.0s) or end (> duration - 2.5s)
       if (seg.relStart < 2.0 || seg.relStart > clipDuration - 2.5) continue;
 

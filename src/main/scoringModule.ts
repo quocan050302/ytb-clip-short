@@ -44,7 +44,11 @@ export class StandardScoringModule implements ScoringModuleInterface {
       (s) => s.end > start && s.start < end
     );
 
-    const fullText = relevantSegments.map((s) => s.text).join(' ').trim();
+    const realSegments = relevantSegments.filter(
+      (s) => !s.isPlaceholder && !/^\[Đoạn nói \d+\]/i.test(s.text)
+    );
+
+    const fullText = realSegments.map((s) => s.text).join(' ').trim();
     const words = fullText.split(/\s+/).filter(Boolean);
     const wordCount = words.length;
     const wordsPerSecond = duration > 0 ? wordCount / duration : 0;
@@ -64,7 +68,7 @@ export class StandardScoringModule implements ScoringModuleInterface {
       hook += 15; // Fast verbal kick-off
     }
 
-    const firstSegment = relevantSegments[0];
+    const firstSegment = realSegments[0];
     if (firstSegment && firstSegment.text) {
       const hookText = firstSegment.text.toLowerCase();
       if (
@@ -87,13 +91,21 @@ export class StandardScoringModule implements ScoringModuleInterface {
 
     // 2. EVALUATE PACING (Flow, word cadence, silence distribution)
     let pacing = 70;
-    // Ideal short-form speaking pace is 2.2 - 3.4 words per second
-    if (wordsPerSecond >= 2.0 && wordsPerSecond <= 3.5) {
-      pacing += 15;
-    } else if (wordsPerSecond < 1.4) {
-      pacing -= 20; // Too sluggish
-    } else if (wordsPerSecond > 4.2) {
-      pacing -= 15; // Too rushed
+    if (realSegments.length > 0) {
+      // Ideal short-form speaking pace is 2.2 - 3.4 words per second
+      if (wordsPerSecond >= 2.0 && wordsPerSecond <= 3.5) {
+        pacing += 15;
+      } else if (wordsPerSecond < 1.4) {
+        pacing -= 20; // Too sluggish
+      } else if (wordsPerSecond > 4.2) {
+        pacing -= 15; // Too rushed
+      }
+    } else {
+      // Cadence based purely on silence distribution
+      const silenceCount = silencesInWindow.length;
+      if (silenceCount >= 2 && silenceCount <= 6) {
+        pacing += 10;
+      }
     }
 
     // Heavy dead air penalty (> 2.0s silence)
@@ -103,7 +115,7 @@ export class StandardScoringModule implements ScoringModuleInterface {
 
     // 3. EVALUATE PAYOFF (Ending 3-6 seconds)
     let payoff = 65;
-    const lastSegment = relevantSegments[relevantSegments.length - 1];
+    const lastSegment = realSegments[realSegments.length - 1];
     if (lastSegment && lastSegment.text) {
       const lastText = lastSegment.text.trim();
       const endsWithPunctuation = /[.!?]$/.test(lastText);
@@ -139,10 +151,14 @@ export class StandardScoringModule implements ScoringModuleInterface {
       reasons.push('Mở đầu có khoảng chờ hoặc tốc độ vừa phải');
     }
 
-    if (pacing >= 75) {
-      reasons.push(`nhịp nói ổn định (${wordsPerSecond.toFixed(1)} từ/s)`);
+    if (realSegments.length > 0) {
+      if (pacing >= 75) {
+        reasons.push(`nhịp nói ổn định (${wordsPerSecond.toFixed(1)} từ/s)`);
+      } else {
+        reasons.push(`nhịp nói chưa tối ưu (${wordsPerSecond.toFixed(1)} từ/s)`);
+      }
     } else {
-      reasons.push(`nhịp nói chưa tối ưu (${wordsPerSecond.toFixed(1)} từ/s)`);
+      reasons.push('cắt theo nhịp năng lượng âm thanh và khoảng lặng');
     }
 
     if (payoff >= 75) {
@@ -153,9 +169,11 @@ export class StandardScoringModule implements ScoringModuleInterface {
 
     const reason = reasons.join(', ') + '.';
 
-    // Excerpt preview (first ~120 characters)
+    // Excerpt preview (no placeholder text, truthful excerpt)
     const transcriptExcerpt =
-      fullText.length > 120 ? fullText.substring(0, 117) + '...' : fullText || '(Đoạn video không có lời thoại)';
+      realSegments.length > 0
+        ? (fullText.length > 120 ? fullText.substring(0, 117) + '...' : fullText)
+        : '(Không có phụ đề - cắt theo nhịp âm thanh)';
 
     return {
       start: Math.round(start * 100) / 100,

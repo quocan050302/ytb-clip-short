@@ -329,6 +329,7 @@ export class HypitAdapter {
     outputPath: string
   ): Promise<string> {
     const hypitPath = await this.getHypitPath();
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
     if (fs.existsSync(outputPath)) {
       fs.unlinkSync(outputPath);

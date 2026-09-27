@@ -282,6 +282,13 @@ export interface RenderedClip {
   status: ClipRenderStatus;
   progress: number;
   outputPath?: string;
+  /** Upload package generated independently of the MP4. */
+  thumbnailPath?: string;
+  publishTitle?: string;
+  thumbnailHook?: string;
+  hashtags?: string[];
+  metadataPath?: string;
+  publishWarning?: string;
   hypitBuildId?: string;
   error?: string;
   duration?: number;

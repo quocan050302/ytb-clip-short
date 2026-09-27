@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Film, FolderOpen, Play, CheckCircle2, Download, ExternalLink, Code } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { FolderOpen, Play, CheckCircle2, ExternalLink, Code } from 'lucide-react';
 import { RenderedClip, JobMetadata } from '../../main/types';
 import { formatTime } from '../../shared/formatTime';
 
@@ -7,15 +7,29 @@ interface OutputGalleryProps {
   job: JobMetadata;
   onOpenFolder: (path: string) => void;
   onShowInFolder: (path: string) => void;
+  onUpdatePackage: (clipId: string, title: string, hook: string, hashtags: string[]) => Promise<void>;
 }
 
 export const OutputGallery: React.FC<OutputGalleryProps> = ({
   job,
   onOpenFolder,
   onShowInFolder,
+  onUpdatePackage,
 }) => {
   const completedClips = job.clips.filter((c) => c.status === 'completed' && c.outputPath);
-  const [activeClip, setActiveClip] = useState<RenderedClip>(completedClips[0] || job.clips[0]);
+  const [activeClipId, setActiveClipId] = useState(completedClips[0]?.id || '');
+  const activeClip = completedClips.find(c => c.id === activeClipId) || completedClips[0];
+  const [draftTitle, setDraftTitle] = useState('');
+  const [draftHook, setDraftHook] = useState('');
+  const [draftTags, setDraftTags] = useState('');
+  const [saveError, setSaveError] = useState('');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setDraftTitle(activeClip?.publishTitle || '');
+    setDraftHook(activeClip?.thumbnailHook || '');
+    setDraftTags(activeClip?.hashtags?.join(' ') || '');
+    setSaveError('');
+  }, [activeClip?.id, activeClip?.updatedAt]);
 
   if (completedClips.length === 0) {
     return null;
@@ -50,7 +64,7 @@ export const OutputGallery: React.FC<OutputGalleryProps> = ({
           <button
             className="btn btn-primary btn-sm"
             onClick={() => onOpenFolder(outputDir)}
-            title="Mở thư mục chứa toàn bộ video MP4 thành phẩm"
+            title="Mở thư mục chứa MP4, thumbnail PNG và metadata JSON"
           >
             <FolderOpen size={15} /> Mở thư mục Outputs
           </button>
@@ -91,6 +105,30 @@ export const OutputGallery: React.FC<OutputGalleryProps> = ({
           <div style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
             Đang phát: <strong>{activeClip?.title}</strong>
           </div>
+          {activeClip && (
+            <div style={{ display: 'grid', gap: 8, padding: 12, border: '1px solid var(--border-subtle)', borderRadius: 10 }}>
+              <label className="input-label">Title khi đăng Short</label>
+              <input className="text-input" value={draftTitle} maxLength={100}
+                onChange={e => setDraftTitle(e.target.value)} />
+              <label className="input-label">Hook chỉ xuất hiện trên thumbnail</label>
+              <input className="text-input" value={draftHook} maxLength={32}
+                onChange={e => setDraftHook(e.target.value)} />
+              <label className="input-label">Hashtag (cách nhau bằng dấu cách)</label>
+              <input className="text-input" value={draftTags}
+                onChange={e => setDraftTags(e.target.value)} />
+              <button className="btn btn-primary btn-sm" disabled={saving}
+                onClick={async () => {
+                  setSaving(true);
+                  setSaveError('');
+                  try {
+                    await onUpdatePackage(activeClip.id, draftTitle, draftHook, draftTags.split(/\s+/));
+                  } catch (error: any) {
+                    setSaveError(error?.message || 'Không lưu được thumbnail');
+                  } finally { setSaving(false); }
+                }}>{saving ? 'Đang cập nhật...' : 'Lưu và tạo lại thumbnail HD'}</button>
+              {saveError && <div style={{ color: '#F87171', fontSize: '0.8rem' }}>{saveError}</div>}
+            </div>
+          )}
         </div>
 
         {/* Clip list cards */}
@@ -105,10 +143,10 @@ export const OutputGallery: React.FC<OutputGalleryProps> = ({
             return (
               <div
                 key={clip.id}
-                onClick={() => setActiveClip(clip)}
+                onClick={() => setActiveClipId(clip.id)}
                 style={{
                   display: 'flex',
-                  alignItems: 'center',
+                  alignItems: 'flex-start',
                   justifyContent: 'space-between',
                   background: isSelected ? 'rgba(99, 102, 241, 0.12)' : 'var(--bg-elevated)',
                   border: `1px solid ${isSelected ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
@@ -118,7 +156,14 @@ export const OutputGallery: React.FC<OutputGalleryProps> = ({
                   transition: 'all 0.2s',
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, minWidth: 0 }}>
+                  {clip.thumbnailPath && (
+                    <img
+                      src={`file://${clip.thumbnailPath}?v=${encodeURIComponent(clip.updatedAt)}`}
+                      alt={`Thumbnail: ${clip.thumbnailHook || clip.title}`}
+                      style={{ width: 85, height: 135, objectFit: 'cover', borderRadius: 8, flexShrink: 0 }}
+                    />
+                  )}
                   <div
                     style={{
                       width: 36,
@@ -133,7 +178,7 @@ export const OutputGallery: React.FC<OutputGalleryProps> = ({
                   >
                     <Play size={16} style={{ marginLeft: 2 }} />
                   </div>
-                  <div>
+                  <div style={{ minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <span style={{ fontSize: '0.95rem', fontWeight: 600 }}>{clip.title}</span>
                       {isHD && (
@@ -184,6 +229,24 @@ export const OutputGallery: React.FC<OutputGalleryProps> = ({
                       {clip.duration ? `${clip.duration.toFixed(0)} giây` : ''} • MP4 (H.264/AAC)
                       {clip.renderEngine ? ` • Engine: ${clip.renderEngine}` : ''}
                     </div>
+                    {clip.publishTitle && (
+                      <div style={{ marginTop: 9, fontSize: '0.84rem', color: 'var(--text-primary)' }}>
+                        <strong>Title:</strong> {clip.publishTitle}
+                      </div>
+                    )}
+                    {clip.thumbnailHook && (
+                      <div style={{ marginTop: 4, fontSize: '0.8rem', color: '#FBBF24' }}>
+                        <strong>Hook trên thumbnail:</strong> {clip.thumbnailHook}
+                      </div>
+                    )}
+                    {!!clip.hashtags?.length && (
+                      <div style={{ marginTop: 4, fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                        {clip.hashtags.join(' ')}
+                      </div>
+                    )}
+                    {clip.publishWarning && (
+                      <div style={{ marginTop: 5, fontSize: '0.76rem', color: '#F87171' }}>{clip.publishWarning}</div>
+                    )}
                   </div>
                 </div>
 
@@ -195,6 +258,13 @@ export const OutputGallery: React.FC<OutputGalleryProps> = ({
                   >
                     <ExternalLink size={13} /> Finder
                   </button>
+                  {clip.thumbnailPath && (
+                    <button className="btn btn-secondary btn-sm"
+                      onClick={() => onShowInFolder(clip.thumbnailPath!)}
+                      title="Hiển thị ảnh thumbnail HD trong Finder">
+                      <ExternalLink size={13} /> Thumbnail HD
+                    </button>
+                  )}
                 </div>
               </div>
             );

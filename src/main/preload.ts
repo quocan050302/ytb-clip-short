@@ -23,6 +23,7 @@ export interface IElectronAPI {
   getTrends: () => Promise<any[]>;
   renderAllCandidates: (jobId: string) => Promise<JobMetadata>;
   renderSingleClip: (jobId: string, clipId: string) => Promise<RenderedClip>;
+  updatePublishPackage: (jobId: string, clipId: string, title: string, hook: string, hashtags: string[]) => Promise<JobMetadata>;
   cancelClipRender: (jobId: string, clipId: string) => Promise<void>;
   getAllJobs: () => Promise<JobMetadata[]>;
   getJob: (jobId: string) => Promise<JobMetadata | null>;
@@ -52,6 +53,8 @@ const api: IElectronAPI = {
     ipcRenderer.invoke('job:renderAll', jobId),
   renderSingleClip: (jobId, clipId) =>
     ipcRenderer.invoke('job:renderSingleClip', jobId, clipId),
+  updatePublishPackage: (jobId, clipId, title, hook, hashtags) =>
+    ipcRenderer.invoke('job:updatePublishPackage', jobId, clipId, title, hook, hashtags),
   cancelClipRender: (jobId, clipId) =>
     ipcRenderer.invoke('job:cancelClip', jobId, clipId),
   getAllJobs: () => ipcRenderer.invoke('job:getAll'),

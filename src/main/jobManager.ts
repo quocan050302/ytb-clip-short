@@ -21,6 +21,7 @@ import { AutoAssetPlanner } from './autoAssetPlanner';
 import { MomentPlanner } from './momentPlanner';
 import { loadSpeechTimeline, filterAndRemapSegments } from './speechTimeline';
 import { enhanceVideo } from './videoEnhancer';
+import { renderShortsThumbnail, suggestShortsCopy, writeShortsMetadata } from './shortsPackage';
 
 export class JobManager {
   private baseJobsDir: string;
@@ -656,6 +657,27 @@ export class JobManager {
       clip.outputPath = finalPath;
       clip.renderEngine = renderEngine;
       clip.enhancedPath = enhancedPath;
+      // Packaging is independent of the validated MP4: a missing drawtext font
+      // should not turn a successfully rendered video into a failed job.
+      const copy = suggestShortsCopy(candidate, relevantSegs);
+      clip.publishTitle = copy.publishTitle;
+      clip.thumbnailHook = copy.thumbnailHook;
+      clip.hashtags = copy.hashtags;
+      const thumbPath = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail.png`);
+      const metadataPath = path.join(job.jobDir, 'outputs', `${clipId}_publish.json`);
+      try {
+        await renderShortsThumbnail(finalPath, thumbPath, copy.thumbnailHook, candidate.duration,
+          await this.hypitAdapter.getFfmpegPath());
+        clip.thumbnailPath = thumbPath;
+        writeShortsMetadata(metadataPath, copy, thumbPath);
+        clip.metadataPath = metadataPath;
+        clip.publishWarning = relevantSegs.some(s => !s.isPlaceholder) ? undefined
+          : 'Không có transcript thật: hãy sửa title, hook và hashtag trước khi đăng.';
+      } catch (packageErr: any) {
+        clip.thumbnailPath = undefined;
+        clip.publishWarning = `Không tạo được thumbnail HD: ${packageErr.message}`;
+        this.addLog(jobId, 'warn', `[${clipId}] ${clip.publishWarning}`, clipId);
+      }
       clip.updatedAt = new Date().toISOString();
       this.addLog(
         jobId, 'info',
@@ -672,6 +694,38 @@ export class JobManager {
       this.notifyUpdate(job);
       return clip;
     }
+  }
+
+  /** Save editorial overrides and redraw only the still image, leaving the MP4 untouched. */
+  async updatePublishPackage(jobId: string, clipId: string, title: string, hook: string, hashtags: string[]): Promise<JobMetadata> {
+    const job = this.jobs.get(jobId);
+    const clip = job?.clips.find(c => c.id === clipId);
+    if (!job || !clip?.outputPath || clip.status !== 'completed') throw new Error('Clip chưa xuất xong');
+    const cleanTitle = title.trim().slice(0, 100);
+    const cleanHook = hook.trim().replace(/[\r\n]/g, ' ').slice(0, 32);
+    const cleanTags = hashtags.map(tag => tag.trim()).filter(tag => /^#[\p{L}\p{N}_]+$/u.test(tag)).slice(0, 5);
+    if (!cleanTitle || !cleanHook) throw new Error('Title và hook không được để trống');
+    const thumbPath = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail.png`);
+    const tempThumbPath = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail_new.png`);
+    try {
+      await renderShortsThumbnail(clip.outputPath, tempThumbPath, cleanHook, clip.duration || 30,
+        await this.hypitAdapter.getFfmpegPath());
+      fs.renameSync(tempThumbPath, thumbPath);
+    } catch (err) {
+      fs.rmSync(tempThumbPath, { force: true });
+      throw err;
+    }
+    const metadataPath = path.join(job.jobDir, 'outputs', `${clipId}_publish.json`);
+    writeShortsMetadata(metadataPath, { publishTitle: cleanTitle, thumbnailHook: cleanHook, hashtags: cleanTags }, thumbPath);
+    clip.publishTitle = cleanTitle;
+    clip.thumbnailHook = cleanHook;
+    clip.hashtags = cleanTags;
+    clip.thumbnailPath = thumbPath;
+    clip.metadataPath = metadataPath;
+    clip.publishWarning = undefined;
+    clip.updatedAt = new Date().toISOString();
+    this.notifyUpdate(job);
+    return job;
   }
 
   /**

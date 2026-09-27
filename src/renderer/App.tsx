@@ -22,19 +22,19 @@ export const App: React.FC = () => {
   // System environment status
   const [envStatus, setEnvStatus] = useState<EnvironmentStatus | null>(null);
 
-  // Default settings (Auto Asset Mode: captions, BGM ducking, SFX, and meme overlays enabled by default)
+  // Text belongs on the standalone thumbnail; the exported video starts clean.
   const [settings, setSettings] = useState<JobSettings>({
     targetClipCount: 5,
     clipDurationMin: 30,
     clipDurationMax: 45,
     aspectRatio: '9:16',
     preset: 'reaction',
-    captions: true,
+    captions: false,
     bgm: true,
     sfx: true,
     broll: true,
     mode: 'local',
-    wordLevelCaptions: true,
+    wordLevelCaptions: false,
     callouts: false,
     visualEffects: true,
     hdEnhance: true,
@@ -382,6 +382,12 @@ export const App: React.FC = () => {
                 job={currentJob}
                 onOpenFolder={handleOpenFolder}
                 onShowInFolder={handleShowInFolder}
+                onUpdatePackage={async (clipId, title, hook, hashtags) => {
+                  const updated = await window.electronAPI.updatePublishPackage(
+                    currentJob.id, clipId, title, hook, hashtags
+                  );
+                  setCurrentJob(updated);
+                }}
               />
             </>
           )}

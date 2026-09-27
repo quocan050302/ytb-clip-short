@@ -172,6 +172,11 @@ function setupIpcHandlers(): void {
     return await jobManager.renderAllCandidates(jobId);
   });
 
+  ipcMain.handle('job:updatePublishPackage', async (_, jobId: string, clipId: string,
+    title: string, hook: string, hashtags: string[]) => {
+    return await jobManager.updatePublishPackage(jobId, clipId, title, hook, hashtags);
+  });
+
   ipcMain.handle(
     'job:renderSingleClip',
     async (_, jobId: string, clipId: string) => {

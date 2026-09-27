@@ -21,7 +21,14 @@ import { AutoAssetPlanner } from './autoAssetPlanner';
 import { MomentPlanner } from './momentPlanner';
 import { loadSpeechTimeline, filterAndRemapSegments } from './speechTimeline';
 import { enhanceVideo } from './videoEnhancer';
-import { renderShortsThumbnail, suggestShortsCopy, writeShortsMetadata } from './shortsPackage';
+import {
+  buildFrameTimestamps,
+  extractFrameCandidates,
+  scoreFrameCandidates,
+  renderShortsThumbnail,
+  suggestShortsCopy,
+  writeShortsMetadata,
+} from './shortsPackage';
 
 export class JobManager {
   private baseJobsDir: string;
@@ -643,8 +650,9 @@ export class JobManager {
         throw new Error(`File MP4 xuất bản không tồn tại hoặc bị lỗi: ${finalPath}`);
       }
 
+      let probeCheck;
       try {
-        const probeCheck = await this.hypitAdapter.probeMedia(finalPath);
+        probeCheck = await this.hypitAdapter.probeMedia(finalPath);
         if (probeCheck.duration <= 0) {
           throw new Error(`File MP4 có thời lượng không hợp lệ (${probeCheck.duration}s)`);
         }
@@ -655,29 +663,21 @@ export class JobManager {
       clip.status = 'completed';
       clip.progress = 100;
       clip.outputPath = finalPath;
+      clip.duration = probeCheck.duration;
       clip.renderEngine = renderEngine;
       clip.enhancedPath = enhancedPath;
-      // Packaging is independent of the validated MP4: a missing drawtext font
-      // should not turn a successfully rendered video into a failed job.
-      const copy = suggestShortsCopy(candidate, relevantSegs);
-      clip.publishTitle = copy.publishTitle;
-      clip.thumbnailHook = copy.thumbnailHook;
-      clip.hashtags = copy.hashtags;
-      const thumbPath = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail.png`);
-      const metadataPath = path.join(job.jobDir, 'outputs', `${clipId}_publish.json`);
+
+      // Packaging is independent of the validated MP4: an error in thumbnail
+      // or metadata generation must not fail the successfully rendered MP4.
       try {
-        await renderShortsThumbnail(finalPath, thumbPath, copy.thumbnailHook, candidate.duration,
-          await this.hypitAdapter.getFfmpegPath());
-        clip.thumbnailPath = thumbPath;
-        writeShortsMetadata(metadataPath, copy, thumbPath);
-        clip.metadataPath = metadataPath;
-        clip.publishWarning = relevantSegs.some(s => !s.isPlaceholder) ? undefined
-          : 'Không có transcript thật: hãy sửa title, hook và hashtag trước khi đăng.';
+        await this.generatePublishPackage(job, clip, candidate, relevantSegs, probeCheck.duration);
       } catch (packageErr: any) {
-        clip.thumbnailPath = undefined;
+        clip.publishStatus = 'failed';
         clip.publishWarning = `Không tạo được thumbnail HD: ${packageErr.message}`;
+        clip.thumbnailPath = undefined;
         this.addLog(jobId, 'warn', `[${clipId}] ${clip.publishWarning}`, clipId);
       }
+
       clip.updatedAt = new Date().toISOString();
       this.addLog(
         jobId, 'info',
@@ -696,34 +696,348 @@ export class JobManager {
     }
   }
 
-  /** Save editorial overrides and redraw only the still image, leaving the MP4 untouched. */
-  async updatePublishPackage(jobId: string, clipId: string, title: string, hook: string, hashtags: string[]): Promise<JobMetadata> {
+  /**
+   * Internal helper to build thumbnails, candidate frames, copy suggestions, and publish metadata.
+   */
+  private async generatePublishPackage(
+    job: JobMetadata,
+    clip: RenderedClip,
+    candidate: ClipCandidate,
+    relevantSegs: TranscriptSegment[],
+    realDuration: number
+  ): Promise<void> {
+    const ffmpegPath = await this.hypitAdapter.getFfmpegPath();
+    const framesDir = path.join(job.jobDir, 'outputs', `${clip.id}_thumbnail_frames`);
+
+    // 1. Generate frame timestamps based on probed duration and edit plan moments
+    const timestamps = buildFrameTimestamps(realDuration, candidate, clip.editPlan);
+
+    // 2. Extract frame candidates using sub-second FFmpeg extraction
+    const rawFrames = await extractFrameCandidates(clip.outputPath!, timestamps, framesDir, ffmpegPath);
+
+    // 3. Score frame candidates and pick 3 distinct frames
+    const moments = clip.editPlan?.moments || candidate.editPlan?.moments || [];
+    const { topFrames, selectedFrame } = await scoreFrameCandidates(rawFrames, moments, ffmpegPath);
+
+    clip.thumbnailFrames = topFrames;
+    clip.selectedThumbnailFrameId = selectedFrame?.id || topFrames[0]?.id;
+    clip.thumbnailLayout = { textPosition: 'top' };
+
+    // 4. Suggest evidence-based copy
+    const copy = suggestShortsCopy(candidate, relevantSegs);
+    clip.publishTitle = copy.publishTitle;
+    clip.publishTitleOptions = copy.publishTitleOptions;
+    clip.thumbnailHook = copy.thumbnailHook;
+    clip.hashtags = copy.hashtags;
+    clip.publishStatus = copy.publishStatus;
+    clip.publishWarning = copy.publishWarning;
+
+    // 5. Render standalone 9:16 Shorts thumbnail PNG (2160x3840)
+    const thumbPath = path.join(job.jobDir, 'outputs', `${clip.id}_thumbnail.png`);
+    const frameToRender = topFrames.find(f => f.id === clip.selectedThumbnailFrameId) || topFrames[0];
+    if (frameToRender && fs.existsSync(frameToRender.path)) {
+      await renderShortsThumbnail(
+        frameToRender.path,
+        thumbPath,
+        copy.thumbnailHook,
+        clip.thumbnailLayout,
+        ffmpegPath
+      );
+      clip.thumbnailPath = thumbPath;
+    }
+
+    // 6. Write <clipId>_publish.json
+    const metadataPath = path.join(job.jobDir, 'outputs', `${clip.id}_publish.json`);
+    writeShortsMetadata(metadataPath, {
+      title: copy.publishTitle,
+      titleOptions: copy.publishTitleOptions,
+      thumbnailHook: copy.thumbnailHook,
+      hashtags: copy.hashtags,
+      selectedFrameId: clip.selectedThumbnailFrameId,
+      selectedFrameTimestamp: frameToRender?.timestamp,
+      layout: clip.thumbnailLayout,
+      thumbnailPath: path.basename(thumbPath),
+      frames: topFrames.map(f => ({
+        id: f.id,
+        timestamp: f.timestamp,
+        path: path.relative(path.join(job.jobDir, 'outputs'), f.path),
+        score: f.score,
+        reason: f.reason,
+      })),
+      status: clip.publishStatus,
+      warning: clip.publishWarning,
+    });
+    clip.metadataPath = metadataPath;
+  }
+
+  /**
+   * Regenerate publish package (candidate frames, suggestions, PNG) from existing MP4 without re-rendering video.
+   */
+  async regeneratePublishPackage(
+    jobId: string,
+    clipId: string,
+    resetSuggestions: boolean = false
+  ): Promise<JobMetadata> {
+    const job = this.jobs.get(jobId);
+    const clip = job?.clips.find(c => c.id === clipId);
+    if (!job || !clip?.outputPath || clip.status !== 'completed') {
+      throw new Error('Clip chưa xuất xong hoặc không tồn tại');
+    }
+    if (!fs.existsSync(clip.outputPath)) {
+      throw new Error(`File MP4 xuất bản không tồn tại: ${clip.outputPath}`);
+    }
+
+    const ffmpegPath = await this.hypitAdapter.getFfmpegPath();
+    const probe = await this.hypitAdapter.probeMedia(clip.outputPath);
+    const duration = probe.duration || clip.duration || 30;
+
+    const candidate = job.candidates.find(c => c.id === clip.candidateId) || {
+      id: clip.candidateId,
+      title: clip.title,
+      start: 0,
+      end: duration,
+      duration,
+      score: 0.8,
+      scoreBreakdown: { hook: 0.8, flow: 0.8, pacing: 0.8, payoff: 0.8 },
+      reason: 'Candidate clip',
+      transcriptExcerpt: '',
+      selected: true,
+      editPlan: clip.editPlan,
+    } as ClipCandidate;
+
+    const relevantSegs = job.transcript.filter(
+      s => s.end >= candidate.start && s.start <= candidate.end
+    );
+
+    const framesDir = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail_frames`);
+    const timestamps = buildFrameTimestamps(duration, candidate, clip.editPlan);
+    const rawFrames = await extractFrameCandidates(clip.outputPath, timestamps, framesDir, ffmpegPath);
+    const moments = clip.editPlan?.moments || candidate.editPlan?.moments || [];
+    const { topFrames, selectedFrame } = await scoreFrameCandidates(rawFrames, moments, ffmpegPath);
+
+    clip.thumbnailFrames = topFrames;
+
+    if (resetSuggestions || !clip.publishTitle) {
+      const copy = suggestShortsCopy(candidate, relevantSegs);
+      clip.publishTitle = copy.publishTitle;
+      clip.publishTitleOptions = copy.publishTitleOptions;
+      clip.thumbnailHook = copy.thumbnailHook;
+      clip.hashtags = copy.hashtags;
+      clip.publishStatus = copy.publishStatus;
+      clip.publishWarning = copy.publishWarning;
+      clip.thumbnailLayout = { textPosition: 'top' };
+      clip.selectedThumbnailFrameId = selectedFrame?.id || topFrames[0]?.id;
+    } else {
+      // Preserve user edits
+      clip.thumbnailLayout = clip.thumbnailLayout || { textPosition: 'top' };
+      const stillValid = topFrames.find(f => f.id === clip.selectedThumbnailFrameId);
+      if (!stillValid) {
+        clip.selectedThumbnailFrameId = selectedFrame?.id || topFrames[0]?.id;
+      }
+      clip.publishStatus = 'ready';
+    }
+
+    const frameToRender = topFrames.find(f => f.id === clip.selectedThumbnailFrameId) || topFrames[0];
+    if (!frameToRender || !fs.existsSync(frameToRender.path)) {
+      throw new Error('Không thể trích xuất khung hình hợp lệ để tạo thumbnail');
+    }
+
+    const thumbPath = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail.png`);
+    const tempThumbPath = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail_tmp.png`);
+
+    try {
+      await renderShortsThumbnail(
+        frameToRender.path,
+        tempThumbPath,
+        clip.thumbnailHook || 'WATCH THIS',
+        clip.thumbnailLayout || { textPosition: 'top' },
+        ffmpegPath
+      );
+      fs.renameSync(tempThumbPath, thumbPath);
+      clip.thumbnailPath = thumbPath;
+      if (clip.publishStatus === 'failed') {
+        clip.publishStatus = 'ready';
+      }
+      clip.publishWarning = undefined;
+    } catch (err: any) {
+      fs.rmSync(tempThumbPath, { force: true });
+      clip.publishStatus = 'failed';
+      clip.publishWarning = `Không tạo được thumbnail HD: ${err.message}`;
+      this.notifyUpdate(job);
+      throw err;
+    }
+
+    const metadataPath = path.join(job.jobDir, 'outputs', `${clipId}_publish.json`);
+    writeShortsMetadata(metadataPath, {
+      title: clip.publishTitle || candidate.title,
+      titleOptions: clip.publishTitleOptions || [clip.publishTitle || candidate.title],
+      thumbnailHook: clip.thumbnailHook || 'WATCH THIS',
+      hashtags: clip.hashtags || ['#Shorts'],
+      selectedFrameId: clip.selectedThumbnailFrameId,
+      selectedFrameTimestamp: frameToRender.timestamp,
+      layout: clip.thumbnailLayout || { textPosition: 'top' },
+      thumbnailPath: path.basename(thumbPath),
+      frames: topFrames.map(f => ({
+        id: f.id,
+        timestamp: f.timestamp,
+        path: path.relative(path.join(job.jobDir, 'outputs'), f.path),
+        score: f.score,
+        reason: f.reason,
+      })),
+      status: clip.publishStatus || 'ready',
+      warning: clip.publishWarning,
+    });
+
+    clip.metadataPath = metadataPath;
+    clip.updatedAt = new Date().toISOString();
+    this.notifyUpdate(job);
+    return job;
+  }
+
+  /**
+   * Save editorial overrides and redraw only the still image if frame/hook/position changed,
+   * leaving the MP4 completely untouched.
+   */
+  async updatePublishPackage(
+    jobId: string,
+    clipId: string,
+    updatesOrTitle: any,
+    legacyHook?: string,
+    legacyHashtags?: string[]
+  ): Promise<JobMetadata> {
     const job = this.jobs.get(jobId);
     const clip = job?.clips.find(c => c.id === clipId);
     if (!job || !clip?.outputPath || clip.status !== 'completed') throw new Error('Clip chưa xuất xong');
-    const cleanTitle = title.trim().slice(0, 100);
-    const cleanHook = hook.trim().replace(/[\r\n]/g, ' ').slice(0, 32);
-    const cleanTags = hashtags.map(tag => tag.trim()).filter(tag => /^#[\p{L}\p{N}_]+$/u.test(tag)).slice(0, 5);
-    if (!cleanTitle || !cleanHook) throw new Error('Title và hook không được để trống');
-    const thumbPath = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail.png`);
-    const tempThumbPath = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail_new.png`);
-    try {
-      await renderShortsThumbnail(clip.outputPath, tempThumbPath, cleanHook, clip.duration || 30,
-        await this.hypitAdapter.getFfmpegPath());
-      fs.renameSync(tempThumbPath, thumbPath);
-    } catch (err) {
-      fs.rmSync(tempThumbPath, { force: true });
-      throw err;
+
+    let updates: {
+      title?: string;
+      hook?: string;
+      hashtags?: string[];
+      selectedFrameId?: string;
+      textPosition?: 'top' | 'middle' | 'bottom';
+    };
+
+    if (typeof updatesOrTitle === 'string') {
+      updates = {
+        title: updatesOrTitle,
+        hook: legacyHook,
+        hashtags: legacyHashtags,
+      };
+    } else {
+      updates = updatesOrTitle || {};
     }
-    const metadataPath = path.join(job.jobDir, 'outputs', `${clipId}_publish.json`);
-    writeShortsMetadata(metadataPath, { publishTitle: cleanTitle, thumbnailHook: cleanHook, hashtags: cleanTags }, thumbPath);
+
+    const cleanTitle = (updates.title !== undefined ? updates.title : (clip.publishTitle || '')).trim().slice(0, 100);
+    const cleanHook = (updates.hook !== undefined ? updates.hook : (clip.thumbnailHook || '')).trim().replace(/[\r\n]/g, ' ').slice(0, 32);
+    const rawTags = updates.hashtags !== undefined ? updates.hashtags : (clip.hashtags || []);
+    const cleanTags = rawTags.map(tag => tag.trim()).filter(tag => /^#[\p{L}\p{N}_]+$/u.test(tag)).slice(0, 5);
+    const targetPosition = updates.textPosition || clip.thumbnailLayout?.textPosition || 'top';
+
+    if (!cleanTitle || !cleanHook) throw new Error('Title và hook không được để trống');
+
+    let targetFrameId = updates.selectedFrameId || clip.selectedThumbnailFrameId;
+    if (updates.selectedFrameId) {
+      const frameMatch = clip.thumbnailFrames?.find(f => f.id === updates.selectedFrameId);
+      if (!frameMatch || !fs.existsSync(frameMatch.path)) {
+        throw new Error(`Khung hình được chọn '${updates.selectedFrameId}' không hợp lệ hoặc không tồn tại`);
+      }
+      const expectedPrefix = path.resolve(job.jobDir, 'outputs');
+      if (!path.resolve(frameMatch.path).startsWith(expectedPrefix)) {
+        throw new Error('Đường dẫn ảnh không thuộc về thư mục xuất của clip này');
+      }
+      targetFrameId = frameMatch.id;
+    }
+
+    const frameChanged = updates.selectedFrameId !== undefined && updates.selectedFrameId !== clip.selectedThumbnailFrameId;
+    const hookChanged = updates.hook !== undefined && cleanHook !== clip.thumbnailHook;
+    const posChanged = updates.textPosition !== undefined && targetPosition !== clip.thumbnailLayout?.textPosition;
+    const missingThumb = !clip.thumbnailPath || !fs.existsSync(clip.thumbnailPath);
+
+    const needsRerender = frameChanged || hookChanged || posChanged || missingThumb;
+
+    const thumbPath = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail.png`);
+    const tempThumbPath = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail_tmp.png`);
+
+    if (needsRerender) {
+      const frameObj = clip.thumbnailFrames?.find(f => f.id === targetFrameId) || clip.thumbnailFrames?.[0];
+      let sourceFramePath = frameObj?.path;
+
+      // Handle older job without thumbnailFrames: extract on demand
+      if (!sourceFramePath || !fs.existsSync(sourceFramePath)) {
+        const framesDir = path.join(job.jobDir, 'outputs', `${clipId}_thumbnail_frames`);
+        const ffmpegPath = await this.hypitAdapter.getFfmpegPath();
+        const candidate = job.candidates.find(c => c.id === clip.candidateId) || {
+          id: clip.candidateId,
+          title: clip.title,
+          start: 0,
+          end: clip.duration || 30,
+          duration: clip.duration || 30,
+          score: 0.8,
+          scoreBreakdown: { hook: 0.8, flow: 0.8, pacing: 0.8, payoff: 0.8 },
+          reason: '',
+          transcriptExcerpt: '',
+          selected: true,
+        } as ClipCandidate;
+        const timestamps = buildFrameTimestamps(clip.duration || 30, candidate, clip.editPlan);
+        const rawFrames = await extractFrameCandidates(clip.outputPath, timestamps, framesDir, ffmpegPath);
+        const { topFrames, selectedFrame } = await scoreFrameCandidates(rawFrames, clip.editPlan?.moments || [], ffmpegPath);
+        clip.thumbnailFrames = topFrames;
+        targetFrameId = selectedFrame?.id || topFrames[0]?.id;
+        sourceFramePath = selectedFrame?.path || topFrames[0]?.path;
+      }
+
+      if (!sourceFramePath || !fs.existsSync(sourceFramePath)) {
+        throw new Error('Không thể tìm thấy khung hình nguồn để vẽ lại thumbnail');
+      }
+
+      try {
+        await renderShortsThumbnail(
+          sourceFramePath,
+          tempThumbPath,
+          cleanHook,
+          { textPosition: targetPosition },
+          await this.hypitAdapter.getFfmpegPath()
+        );
+        fs.renameSync(tempThumbPath, thumbPath);
+        clip.thumbnailPath = thumbPath;
+      } catch (err) {
+        fs.rmSync(tempThumbPath, { force: true });
+        throw err;
+      }
+    }
+
     clip.publishTitle = cleanTitle;
     clip.thumbnailHook = cleanHook;
     clip.hashtags = cleanTags;
-    clip.thumbnailPath = thumbPath;
-    clip.metadataPath = metadataPath;
+    clip.selectedThumbnailFrameId = targetFrameId;
+    clip.thumbnailLayout = { textPosition: targetPosition };
+    clip.publishStatus = 'ready';
     clip.publishWarning = undefined;
     clip.updatedAt = new Date().toISOString();
+
+    const metadataPath = path.join(job.jobDir, 'outputs', `${clipId}_publish.json`);
+    const activeFrame = clip.thumbnailFrames?.find(f => f.id === clip.selectedThumbnailFrameId);
+    writeShortsMetadata(metadataPath, {
+      title: cleanTitle,
+      titleOptions: clip.publishTitleOptions || [cleanTitle],
+      thumbnailHook: cleanHook,
+      hashtags: cleanTags,
+      selectedFrameId: clip.selectedThumbnailFrameId,
+      selectedFrameTimestamp: activeFrame?.timestamp,
+      layout: clip.thumbnailLayout,
+      thumbnailPath: path.basename(thumbPath),
+      frames: (clip.thumbnailFrames || []).map(f => ({
+        id: f.id,
+        timestamp: f.timestamp,
+        path: path.relative(path.join(job.jobDir, 'outputs'), f.path),
+        score: f.score,
+        reason: f.reason,
+      })),
+      status: clip.publishStatus,
+      warning: clip.publishWarning,
+    });
+    clip.metadataPath = metadataPath;
+
     this.notifyUpdate(job);
     return job;
   }

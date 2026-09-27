@@ -172,10 +172,19 @@ function setupIpcHandlers(): void {
     return await jobManager.renderAllCandidates(jobId);
   });
 
-  ipcMain.handle('job:updatePublishPackage', async (_, jobId: string, clipId: string,
-    title: string, hook: string, hashtags: string[]) => {
-    return await jobManager.updatePublishPackage(jobId, clipId, title, hook, hashtags);
-  });
+  ipcMain.handle(
+    'job:updatePublishPackage',
+    async (_, jobId: string, clipId: string, updatesOrTitle: any, hook?: string, hashtags?: string[]) => {
+      return await jobManager.updatePublishPackage(jobId, clipId, updatesOrTitle, hook, hashtags);
+    }
+  );
+
+  ipcMain.handle(
+    'job:regeneratePublishPackage',
+    async (_, jobId: string, clipId: string, resetSuggestions?: boolean) => {
+      return await jobManager.regeneratePublishPackage(jobId, clipId, resetSuggestions);
+    }
+  );
 
   ipcMain.handle(
     'job:renderSingleClip',

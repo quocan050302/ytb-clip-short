@@ -10,6 +10,14 @@ import {
   RenderedClip,
 } from './types';
 
+export interface PublishPackageUpdates {
+  title?: string;
+  hook?: string;
+  hashtags?: string[];
+  selectedFrameId?: string;
+  textPosition?: 'top' | 'middle' | 'bottom';
+}
+
 export interface IElectronAPI {
   selectVideoFile: () => Promise<string | null>;
   selectSrtFile: () => Promise<{ path: string; content: string } | null>;
@@ -23,7 +31,18 @@ export interface IElectronAPI {
   getTrends: () => Promise<any[]>;
   renderAllCandidates: (jobId: string) => Promise<JobMetadata>;
   renderSingleClip: (jobId: string, clipId: string) => Promise<RenderedClip>;
-  updatePublishPackage: (jobId: string, clipId: string, title: string, hook: string, hashtags: string[]) => Promise<JobMetadata>;
+  updatePublishPackage: (
+    jobId: string,
+    clipId: string,
+    updatesOrTitle: PublishPackageUpdates | string,
+    hook?: string,
+    hashtags?: string[]
+  ) => Promise<JobMetadata>;
+  regeneratePublishPackage: (
+    jobId: string,
+    clipId: string,
+    resetSuggestions?: boolean
+  ) => Promise<JobMetadata>;
   cancelClipRender: (jobId: string, clipId: string) => Promise<void>;
   getAllJobs: () => Promise<JobMetadata[]>;
   getJob: (jobId: string) => Promise<JobMetadata | null>;
@@ -53,8 +72,10 @@ const api: IElectronAPI = {
     ipcRenderer.invoke('job:renderAll', jobId),
   renderSingleClip: (jobId, clipId) =>
     ipcRenderer.invoke('job:renderSingleClip', jobId, clipId),
-  updatePublishPackage: (jobId, clipId, title, hook, hashtags) =>
-    ipcRenderer.invoke('job:updatePublishPackage', jobId, clipId, title, hook, hashtags),
+  updatePublishPackage: (jobId, clipId, updatesOrTitle, hook, hashtags) =>
+    ipcRenderer.invoke('job:updatePublishPackage', jobId, clipId, updatesOrTitle, hook, hashtags),
+  regeneratePublishPackage: (jobId, clipId, resetSuggestions) =>
+    ipcRenderer.invoke('job:regeneratePublishPackage', jobId, clipId, resetSuggestions),
   cancelClipRender: (jobId, clipId) =>
     ipcRenderer.invoke('job:cancelClip', jobId, clipId),
   getAllJobs: () => ipcRenderer.invoke('job:getAll'),

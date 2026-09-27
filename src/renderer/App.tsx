@@ -382,9 +382,15 @@ export const App: React.FC = () => {
                 job={currentJob}
                 onOpenFolder={handleOpenFolder}
                 onShowInFolder={handleShowInFolder}
-                onUpdatePackage={async (clipId, title, hook, hashtags) => {
+                onUpdatePackage={async (clipId, updates) => {
                   const updated = await window.electronAPI.updatePublishPackage(
-                    currentJob.id, clipId, title, hook, hashtags
+                    currentJob.id, clipId, updates
+                  );
+                  setCurrentJob(updated);
+                }}
+                onRegeneratePackage={async (clipId, resetSuggestions) => {
+                  const updated = await window.electronAPI.regeneratePublishPackage(
+                    currentJob.id, clipId, resetSuggestions
                   );
                   setCurrentJob(updated);
                 }}

@@ -275,6 +275,20 @@ export type ClipRenderStatus =
   | 'failed'
   | 'canceled';
 
+export interface ThumbnailFrame {
+  id: string;
+  timestamp: number;
+  path: string;
+  score: number;
+  reason: string;
+}
+
+export interface ThumbnailLayout {
+  textPosition: 'top' | 'middle' | 'bottom';
+}
+
+export type PublishStatus = 'pending' | 'generating' | 'ready' | 'needs_review' | 'failed';
+
 export interface RenderedClip {
   id: string;
   candidateId: string;
@@ -289,6 +303,11 @@ export interface RenderedClip {
   hashtags?: string[];
   metadataPath?: string;
   publishWarning?: string;
+  thumbnailFrames?: ThumbnailFrame[];
+  selectedThumbnailFrameId?: string;
+  thumbnailLayout?: ThumbnailLayout;
+  publishTitleOptions?: string[];
+  publishStatus?: PublishStatus;
   hypitBuildId?: string;
   error?: string;
   duration?: number;

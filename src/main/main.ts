@@ -118,6 +118,28 @@ function setupIpcHandlers(): void {
     return null;
   });
 
+  ipcMain.handle('dialog:importSfx', async (_, mode?: 'files' | 'folder') => {
+    if (!mainWindow) return null;
+    const isFolder = mode === 'folder';
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: isFolder ? 'Chọn thư mục chứa SFX' : 'Chọn các file SFX (.mp3, .wav, .aac...)',
+      properties: isFolder
+        ? ['openDirectory']
+        : ['openFile', 'multiSelections'],
+      filters: isFolder
+        ? undefined
+        : [
+            { name: 'Audio Files', extensions: ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'] },
+            { name: 'All Files', extensions: ['*'] },
+          ],
+    });
+    if (!res.canceled && res.filePaths.length > 0) {
+      const provider = jobManager.getAutoAssetPlanner().getAssetProvider();
+      return await provider.importSfxPaths(res.filePaths);
+    }
+    return null;
+  });
+
   // Shell integration
   ipcMain.handle('system:openPath', async (_, targetPath: string) => {
     if (fs.existsSync(targetPath)) {
@@ -166,6 +188,26 @@ function setupIpcHandlers(): void {
 
   ipcMain.handle('asset:getTrends', async () => {
     return jobManager.getAutoAssetPlanner().getTrendCatalog().getTrends();
+  });
+
+  ipcMain.handle('asset:importSfxPaths', async (_, paths: string[]) => {
+    const provider = jobManager.getAutoAssetPlanner().getAssetProvider();
+    return await provider.importSfxPaths(paths);
+  });
+
+  ipcMain.handle('asset:getImportedSfx', async () => {
+    const provider = jobManager.getAutoAssetPlanner().getAssetProvider();
+    return provider.getImportedAssets();
+  });
+
+  ipcMain.handle('asset:updateImportedSfx', async (_, id: string, updates: any) => {
+    const provider = jobManager.getAutoAssetPlanner().getAssetProvider();
+    return await provider.updateImportedAsset(id, updates);
+  });
+
+  ipcMain.handle('asset:deleteImportedSfx', async (_, id: string) => {
+    const provider = jobManager.getAutoAssetPlanner().getAssetProvider();
+    return await provider.deleteImportedAsset(id);
   });
 
   ipcMain.handle('job:renderAll', async (_, jobId: string) => {

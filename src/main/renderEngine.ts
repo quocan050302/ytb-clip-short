@@ -59,8 +59,11 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
     outputPath, editPlan, relevantSegments, ffmpegPath, ffprobePath,
     onProgress, onLog } = opts;
 
-  onProgress(30, 'Xây dựng filter graph FFmpeg...');
-  onLog(`[RenderEngine][${clipId}] Bắt đầu render với FFmpeg (ffmpeg-fallback engine)`);
+  const reportProgress = onProgress || (() => {});
+  const reportLog = onLog || (() => {});
+
+  reportProgress(30, 'Xây dựng filter graph FFmpeg...');
+  reportLog(`[RenderEngine][${clipId}] Bắt đầu render với FFmpeg (ffmpeg-fallback engine)`);
 
   const tempPath = path.join(projectDir, `re_tmp_${clipId}.mp4`);
   if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
@@ -71,13 +74,13 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
 
   // Visual overlay inputs (meme images / stickers)
   const visualInputs: Array<{ inputIdx: number; plan: VisualOverlayPlan }> = [];
-  for (const vo of editPlan.visualOverlays) {
+  for (const vo of (editPlan.visualOverlays || [])) {
     if (vo.type === 'meme-image' || vo.type === 'sticker') {
       if (fs.existsSync(vo.assetPath)) {
         ffmpegArgs.push('-i', vo.assetPath);
         visualInputs.push({ inputIdx: nextInput++, plan: vo });
       } else {
-        onLog(`[RenderEngine] WARN: Visual overlay asset missing: ${vo.assetPath} – skipping`);
+        reportLog(`[RenderEngine] WARN: Visual overlay asset missing: ${vo.assetPath} – skipping`);
       }
     }
   }
@@ -91,13 +94,13 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
 
   // SFX / audio event inputs
   const audioInputs: Array<{ inputIdx: number; plan: AudioEventPlan }> = [];
-  for (const ae of editPlan.audioEvents) {
+  for (const ae of (editPlan.audioEvents || [])) {
     if (ae.type === 'sfx' || ae.type === 'stinger') {
       if (fs.existsSync(ae.assetPath)) {
         ffmpegArgs.push('-i', ae.assetPath);
         audioInputs.push({ inputIdx: nextInput++, plan: ae });
       } else {
-        onLog(`[RenderEngine] WARN: Audio event asset missing: ${ae.assetPath} – skipping`);
+        reportLog(`[RenderEngine] WARN: Audio event asset missing: ${ae.assetPath} – skipping`);
       }
     }
   }
@@ -121,7 +124,7 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
   currentVLabel = 'v_reframe';
 
   // Step 2: Effects (zoom-punch, shake, flash, vignette, color-grade)
-  const sortedEffects = [...editPlan.effects].sort((a, b) => a.start - b.start);
+  const sortedEffects = [...(editPlan.effects || [])].sort((a, b) => a.start - b.start);
   currentVLabel = applyEffects(vfChains, currentVLabel, sortedEffects, candidate.duration);
 
   // Step 3: Captions (ASS burn-in)
@@ -304,12 +307,12 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
     '-y',
   );
 
-  onProgress(50, 'Đang render FFmpeg (ffmpeg-fallback)...');
+  reportProgress(50, 'Đang render FFmpeg (ffmpeg-fallback)...');
 
   const { promise, cancel } = runSpawn(ffmpegPath, ffmpegArgs, {
     onStderr: (chunk) => {
       if (chunk.includes('time=')) {
-        onProgress(80, 'Encoding MP4...');
+        reportProgress(80, 'Encoding MP4...');
       }
     },
   });
@@ -323,7 +326,7 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
   }
 
   // ── ffprobe validation ─────────────────────────────────────────────────────
-  onProgress(90, 'Kiểm tra file output bằng ffprobe...');
+  reportProgress(90, 'Kiểm tra file output bằng ffprobe...');
   const probeRes = await runSpawn(ffprobePath, [
     '-v', 'quiet', '-print_format', 'json',
     '-show_format', '-show_streams', tempPath,
@@ -343,11 +346,11 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
   if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
   fs.renameSync(tempPath, outputPath);
 
-  onLog(
+  reportLog(
     `[RenderEngine][${clipId}] ✅ Render xong (engine: ffmpeg-fallback). ` +
     `Output: ${outputPath} | Duration: ${duration.toFixed(2)}s`
   );
-  onProgress(100, 'Hoàn tất render');
+  reportProgress(100, 'Hoàn tất render');
 
   return { outputPath, engine: 'ffmpeg-fallback', duration };
 }
@@ -506,7 +509,7 @@ function generateWordLevelAss(
 /**
  * Probe audio duration using ffprobe
  */
-export async function probeAudioDuration(filePath: string, ffprobePath: string): Promise<number> {
+export async function probeAudioDuration(filePath: string, ffprobePath: string = 'ffprobe'): Promise<number> {
   try {
     const res = await runSpawn(ffprobePath, [
       '-v', 'error',
@@ -525,7 +528,7 @@ export async function probeAudioDuration(filePath: string, ffprobePath: string):
 /**
  * Check if a media file contains an audio stream
  */
-export async function probeHasAudio(filePath: string, ffprobePath: string): Promise<boolean> {
+export async function probeHasAudio(filePath: string, ffprobePath: string = 'ffprobe'): Promise<boolean> {
   try {
     const res = await runSpawn(ffprobePath, [
       '-v', 'error',

@@ -128,6 +128,47 @@ export interface AssetItem {
   fingerprint: string;
   mood?: string;
   tags: string[];
+  category?: string;
+  confidence?: number;
+  reviewStatus?: 'approved' | 'needs_review' | 'pending';
+  originalFilename?: string;
+  description?: string;
+}
+
+export interface ImportedSfxMetadata {
+  id: string;
+  originalFilename: string;
+  displayName: string;
+  storedFilename: string;
+  filePath: string;
+  sha256: string;
+  duration: number;
+  sampleRate?: number;
+  channels?: number;
+  tags: string[];
+  category: string;
+  description: string;
+  confidence: number;
+  reviewStatus: 'approved' | 'needs_review' | 'pending';
+  license: string; // Defaults to 'Chưa xác nhận'
+  importedAt: string;
+}
+
+export interface ImportResult {
+  imported: ImportedSfxMetadata[];
+  duplicates: Array<{ filename: string; sha256: string; existingName: string }>;
+  failed: Array<{ path: string; error: string }>;
+}
+
+export interface MomentCandidate {
+  id: string;
+  timestamp: number; // seconds relative to clip start
+  type: string;
+  evidence: string;
+  confidence: number; // 0.0 - 1.0
+  suggestedSfx?: AssetItem;
+  reason?: string;
+  status: 'suggested' | 'approved' | 'rejected' | 'modified';
 }
 
 // ─── Legacy Beat / Asset Plan (kept for backward compat) ─────────────────────
@@ -169,6 +210,7 @@ export interface ClipAssetPlan {
   musicTrack: AssetItem | null;
   beats: BeatEvent[];
   sfxEvents?: PlannedSfxEvent[];
+  suggestedMoments?: MomentCandidate[];
   duckingSettings: DuckingSettings;
 }
 

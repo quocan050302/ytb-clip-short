@@ -4,6 +4,8 @@ import {
   ClipAssetPlan,
   ClipCandidate,
   EnvironmentStatus,
+  ImportedSfxMetadata,
+  ImportResult,
   JobMetadata,
   JobSettings,
   LogEntry,
@@ -51,6 +53,13 @@ export interface IElectronAPI {
   showItemInFolder: (targetPath: string) => Promise<void>;
   onJobUpdated: (callback: (job: JobMetadata) => void) => () => void;
   onLog: (callback: (log: LogEntry) => void) => () => void;
+
+  // SFX Import & Management
+  importSfxDialog: (mode?: 'files' | 'folder') => Promise<ImportResult | null>;
+  importSfxPaths: (paths: string[]) => Promise<ImportResult>;
+  getImportedSfx: () => Promise<ImportedSfxMetadata[]>;
+  updateImportedSfx: (id: string, updates: Partial<ImportedSfxMetadata>) => Promise<ImportedSfxMetadata>;
+  deleteImportedSfx: (id: string) => Promise<boolean>;
 }
 
 const api: IElectronAPI = {
@@ -94,6 +103,11 @@ const api: IElectronAPI = {
     ipcRenderer.on('job:log', handler);
     return () => ipcRenderer.removeListener('job:log', handler);
   },
+  importSfxDialog: (mode) => ipcRenderer.invoke('dialog:importSfx', mode),
+  importSfxPaths: (paths) => ipcRenderer.invoke('asset:importSfxPaths', paths),
+  getImportedSfx: () => ipcRenderer.invoke('asset:getImportedSfx'),
+  updateImportedSfx: (id, updates) => ipcRenderer.invoke('asset:updateImportedSfx', id, updates),
+  deleteImportedSfx: (id) => ipcRenderer.invoke('asset:deleteImportedSfx', id),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', api);

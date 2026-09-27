@@ -17,6 +17,14 @@ import {
   AlertTriangle,
   Info,
   Sliders,
+  FolderPlus,
+  Folder,
+  FileAudio,
+  CheckCircle2,
+  CheckCheck,
+  HelpCircle,
+  ThumbsUp,
+  RefreshCw,
 } from 'lucide-react';
 import {
   AssetItem,
@@ -24,8 +32,10 @@ import {
   BeatType,
   ClipAssetPlan,
   ClipCandidate,
+  MomentCandidate,
   PlannedSfxEvent,
 } from '../../main/types';
+import { SfxLibraryModal } from './SfxLibraryModal';
 
 interface AssetPlanModalProps {
   candidate: ClipCandidate;
@@ -46,6 +56,14 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
   // Audio audition state
   const [playingAssetId, setPlayingAssetId] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // AI sound proposals state
+  const [suggestedMoments, setSuggestedMoments] = useState<MomentCandidate[]>(() => {
+    return candidate.assetPlan?.suggestedMoments
+      ? JSON.parse(JSON.stringify(candidate.assetPlan.suggestedMoments))
+      : [];
+  });
+  const [showLibraryModal, setShowLibraryModal] = useState<boolean>(false);
 
   // Local editable copy of plan with automatic migration to sfxEvents[]
   const [plan, setPlan] = useState<ClipAssetPlan>(() => {
@@ -274,6 +292,92 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
     setPlan({ ...plan, sfxEvents: newEvents });
   };
 
+  // ── AI Sound Proposal Actions (Two-Tier AI Selection) ───────────────────────
+
+  const handleApplyAllSuggested = () => {
+    const newSfxEvents = [...(plan.sfxEvents || [])];
+    let addedCount = 0;
+
+    suggestedMoments.forEach((m) => {
+      if (!m.suggestedSfx) return;
+      const alreadyExists = newSfxEvents.some(
+        (e) => Math.abs(e.triggerAt - m.timestamp) < 0.25 && e.asset.id === m.suggestedSfx?.id
+      );
+      if (!alreadyExists) {
+        newSfxEvents.push({
+          id: `sfx_moment_${m.id}_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+          asset: m.suggestedSfx,
+          triggerAt: Math.round(m.timestamp * 10) / 10,
+          duration: undefined,
+          volume: 0.85,
+          fadeIn: 0.05,
+          fadeOut: 0.25,
+          enabled: true,
+          origin: 'auto',
+          reason: m.reason || m.evidence,
+        });
+        addedCount++;
+      }
+    });
+
+    setPlan({ ...plan, sfxEvents: newSfxEvents });
+  };
+
+  const handleAcceptMoment = (m: MomentCandidate) => {
+    if (!m.suggestedSfx) return;
+    const newSfxEvents = [...(plan.sfxEvents || [])];
+    const alreadyExists = newSfxEvents.some(
+      (e) => Math.abs(e.triggerAt - m.timestamp) < 0.25 && e.asset.id === m.suggestedSfx?.id
+    );
+    if (!alreadyExists) {
+      newSfxEvents.push({
+        id: `sfx_moment_${m.id}_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+        asset: m.suggestedSfx,
+        triggerAt: Math.round(m.timestamp * 10) / 10,
+        duration: undefined,
+        volume: 0.85,
+        fadeIn: 0.05,
+        fadeOut: 0.25,
+        enabled: true,
+        origin: 'auto',
+        reason: m.reason || m.evidence,
+      });
+      setPlan({ ...plan, sfxEvents: newSfxEvents });
+    }
+  };
+
+  const handleChangeMomentSfx = (momentId: string, asset: AssetItem) => {
+    setSuggestedMoments((prev) =>
+      prev.map((m) => (m.id === momentId ? { ...m, suggestedSfx: asset } : m))
+    );
+  };
+
+  const handleDismissMoment = (momentId: string) => {
+    setSuggestedMoments((prev) => prev.filter((m) => m.id !== momentId));
+  };
+
+  const handleImportFromFinder = async (mode: 'files' | 'folder' = 'files') => {
+    if (!window.electronAPI) return;
+    try {
+      const res = await window.electronAPI.importSfxDialog(mode);
+      if (res && res.imported.length > 0) {
+        await handleRefreshSfxAssets();
+      }
+    } catch (err) {
+      console.error('Import from Finder failed:', err);
+    }
+  };
+
+  const handleRefreshSfxAssets = async () => {
+    if (!window.electronAPI) return;
+    try {
+      const sfxList = await window.electronAPI.getAllAssets('sfx');
+      setAvailableSfx(sfxList);
+    } catch (err) {
+      console.error('Failed to reload SFX:', err);
+    }
+  };
+
   // ── Validation & Save ──────────────────────────────────────────────────────
 
   const handleSaveModal = () => {
@@ -304,7 +408,11 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
       audioRef.current.pause();
       audioRef.current = null;
     }
-    onSave(plan);
+    const finalPlan: ClipAssetPlan = {
+      ...plan,
+      suggestedMoments,
+    };
+    onSave(finalPlan);
     onClose();
   };
 
@@ -463,7 +571,7 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
           </div>
         </div>
 
-        {/* 2. SFX TIMELINE SECTION (MULTI-SFX INDEPENDENT TIMELINE) */}
+        {/* 2. BẢNG DUYỆT ĐỀ XUẤT SFX TỪ AI (TWO-TIER AI SOUND PROPOSAL) */}
         <div
           style={{
             background: 'var(--bg-elevated)',
@@ -473,7 +581,256 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
             marginBottom: 16,
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700, fontSize: '0.95rem' }}>
+                <Sparkles size={18} color="var(--accent-primary)" />
+                Đề Xuất SFX Từ AI Theo Bối Cảnh Lời Thoại & Âm Thanh
+                <span className="badge badge-hook" style={{ fontSize: '0.7rem' }}>
+                  AI Proposal Engine
+                </span>
+              </div>
+              <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: 2 }}>
+                Tự động đối chiếu 2 phía: nội dung bối cảnh clip (lời thoại thật, khoảng lặng, beat) &amp; thư viện SFX (tags, tính chất âm). Không tự rải SFX bừa bãi.
+              </div>
+            </div>
+
+            {suggestedMoments.length > 0 && (
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={handleApplyAllSuggested}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.78rem' }}
+                title="Thêm tất cả các SFX được đề xuất phù hợp vào timeline bên dưới"
+              >
+                <CheckCheck size={14} /> Áp dụng các đề xuất phù hợp
+              </button>
+            )}
+          </div>
+
+          {suggestedMoments.length === 0 ? (
+            <div
+              style={{
+                textAlign: 'center',
+                padding: '20px 14px',
+                color: 'var(--text-dim)',
+                fontSize: '0.82rem',
+                background: 'rgba(0,0,0,0.18)',
+                borderRadius: 'var(--radius-sm)',
+              }}
+            >
+              Chưa có khoảnh khắc nổi bật nào cần chèn âm thanh theo transcript thật. Bạn có thể tự thêm SFX từ thư viện bên dưới.
+            </div>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table
+                style={{
+                  width: '100%',
+                  borderCollapse: 'collapse',
+                  fontSize: '0.78rem',
+                  textAlign: 'left',
+                }}
+              >
+                <thead>
+                  <tr
+                    style={{
+                      borderBottom: '1px solid var(--border-subtle)',
+                      color: 'var(--text-dim)',
+                      fontSize: '0.72rem',
+                      textTransform: 'uppercase',
+                    }}
+                  >
+                    <th style={{ padding: '8px 6px' }}>Thời điểm</th>
+                    <th style={{ padding: '8px 6px' }}>Khoảnh khắc phát hiện</th>
+                    <th style={{ padding: '8px 6px' }}>SFX đề xuất</th>
+                    <th style={{ padding: '8px 6px' }}>Lý do</th>
+                    <th style={{ padding: '8px 6px' }}>Độ tin cậy</th>
+                    <th style={{ padding: '8px 6px', textAlign: 'center' }}>Nghe thử</th>
+                    <th style={{ padding: '8px 6px', textAlign: 'right' }}>Chấp nhận / Đổi / Xóa</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {suggestedMoments.map((m) => {
+                    const isPlaying = m.suggestedSfx && playingAssetId === `prop_${m.id}`;
+                    const isAlreadyAdded = (plan.sfxEvents || []).some(
+                      (e) => Math.abs(e.triggerAt - m.timestamp) < 0.25 && e.asset.id === m.suggestedSfx?.id
+                    );
+
+                    return (
+                      <tr
+                        key={m.id}
+                        style={{
+                          borderBottom: '1px solid rgba(255,255,255,0.04)',
+                          background: isAlreadyAdded ? 'rgba(16, 185, 129, 0.05)' : 'transparent',
+                        }}
+                      >
+                        {/* 1. Timestamp */}
+                        <td style={{ padding: '8px 6px', whiteSpace: 'nowrap' }}>
+                          <span
+                            style={{
+                              fontFamily: 'var(--font-mono)',
+                              fontWeight: 700,
+                              color: 'var(--status-warning)',
+                            }}
+                          >
+                            @{m.timestamp.toFixed(1)}s
+                          </span>
+                        </td>
+
+                        {/* 2. Detected Moment */}
+                        <td style={{ padding: '8px 6px', maxWidth: 180 }}>
+                          <span
+                            className="badge badge-secondary"
+                            style={{ fontSize: '0.68rem', marginRight: 4 }}
+                          >
+                            {m.type.toUpperCase()}
+                          </span>
+                          <span style={{ color: 'var(--text-muted)', fontSize: '0.73rem' }}>
+                            {m.evidence}
+                          </span>
+                        </td>
+
+                        {/* 3. Proposed SFX */}
+                        <td style={{ padding: '8px 6px', minWidth: 160 }}>
+                          {m.suggestedSfx ? (
+                            <div>
+                              <div style={{ fontWeight: 600, color: 'var(--text-main)' }}>
+                                {m.suggestedSfx.name}
+                              </div>
+                              <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>
+                                Tag: {(m.suggestedSfx.tags || []).slice(0, 3).join(', ')}
+                              </div>
+                            </div>
+                          ) : (
+                            <span style={{ color: 'var(--text-dim)', fontStyle: 'italic' }}>
+                              (Chưa có SFX khớp)
+                            </span>
+                          )}
+                        </td>
+
+                        {/* 4. Reason */}
+                        <td style={{ padding: '8px 6px', maxWidth: 220, fontSize: '0.73rem', color: 'var(--text-muted)' }}>
+                          {m.reason || m.evidence}
+                        </td>
+
+                        {/* 5. Confidence */}
+                        <td style={{ padding: '8px 6px', whiteSpace: 'nowrap' }}>
+                          {m.status === 'suggested' || m.confidence < 0.75 ? (
+                            <span
+                              className="badge"
+                              style={{ background: 'rgba(245, 158, 11, 0.2)', color: '#FBBF24', fontSize: '0.68rem' }}
+                            >
+                              Đề xuất để duyệt ({Math.round(m.confidence * 100)}%)
+                            </span>
+                          ) : (
+                            <span
+                              className="badge badge-success"
+                              style={{ fontSize: '0.68rem' }}
+                            >
+                              {Math.round(m.confidence * 100)}%
+                            </span>
+                          )}
+                        </td>
+
+                        {/* 6. Audition */}
+                        <td style={{ padding: '8px 6px', textAlign: 'center' }}>
+                          {m.suggestedSfx ? (
+                            <button
+                              className={`btn ${isPlaying ? 'btn-danger' : 'btn-secondary'} btn-sm`}
+                              style={{ padding: '2px 6px', fontSize: '0.7rem' }}
+                              onClick={() => handleToggleAudition(m.suggestedSfx!.filePath, `prop_${m.id}`)}
+                              title="Nghe thử âm thanh SFX này"
+                            >
+                              {isPlaying ? <Square size={10} /> : <Play size={10} />}
+                            </button>
+                          ) : (
+                            <span style={{ color: 'var(--text-dim)' }}>—</span>
+                          )}
+                        </td>
+
+                        {/* 7. Action: Accept / Change / Dismiss */}
+                        <td style={{ padding: '8px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                            {isAlreadyAdded ? (
+                              <span
+                                style={{
+                                  fontSize: '0.7rem',
+                                  color: 'var(--status-success)',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 2,
+                                  fontWeight: 600,
+                                }}
+                              >
+                                <Check size={12} /> Đã thêm
+                              </span>
+                            ) : (
+                              <button
+                                className="btn btn-primary btn-sm"
+                                style={{ padding: '3px 8px', fontSize: '0.72rem' }}
+                                onClick={() => handleAcceptMoment(m)}
+                                disabled={!m.suggestedSfx}
+                                title="Chấp nhận đề xuất này và thêm vào timeline SFX bên dưới"
+                              >
+                                Chấp nhận
+                              </button>
+                            )}
+
+                            {/* Change SFX dropdown */}
+                            <select
+                              className="text-input"
+                              style={{
+                                fontSize: '0.72rem',
+                                padding: '3px 6px',
+                                maxWidth: 110,
+                                cursor: 'pointer',
+                              }}
+                              value={m.suggestedSfx?.id || ''}
+                              onChange={(e) => {
+                                const found = availableSfx.find((s) => s.id === e.target.value);
+                                if (found) handleChangeMomentSfx(m.id, found);
+                              }}
+                              title="Đổi sang SFX khác từ thư viện"
+                            >
+                              <option value="" disabled>
+                                Đổi SFX...
+                              </option>
+                              {availableSfx.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.name}
+                                </option>
+                              ))}
+                            </select>
+
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              style={{ padding: '3px 6px', fontSize: '0.72rem', color: '#F87171' }}
+                              onClick={() => handleDismissMoment(m.id)}
+                              title="Bỏ qua đề xuất này"
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* 3. SFX TIMELINE SECTION (MULTI-SFX INDEPENDENT TIMELINE) */}
+        <div
+          style={{
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: 'var(--radius-md)',
+            padding: '16px 18px',
+            marginBottom: 16,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700, fontSize: '0.95rem' }}>
               <Volume2 size={18} color="var(--status-warning)" />
               Timeline SFX của Short
@@ -481,13 +838,31 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
                 {sfxEventsSorted.length} SFX trong Short
               </span>
             </div>
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={() => handleAddSfx()}
-              style={{ padding: '4px 12px', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: 6 }}
-            >
-              <Plus size={14} /> + Thêm SFX
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => handleImportFromFinder('files')}
+                style={{ padding: '4px 10px', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: 6 }}
+                title="Chọn các file MP3/WAV từ macOS Finder để import vào app"
+              >
+                <FileAudio size={13} /> Import SFX từ máy
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => setShowLibraryModal(true)}
+                style={{ padding: '4px 10px', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: 6 }}
+                title="Xem, nghe thử, sửa tên/tag hoặc xóa SFX trong thư viện"
+              >
+                <FolderPlus size={13} /> Quản lý thư viện SFX
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => handleAddSfx()}
+                style={{ padding: '4px 12px', fontSize: '0.76rem', display: 'flex', alignItems: 'center', gap: 6 }}
+              >
+                <Plus size={14} /> + Thêm SFX
+              </button>
+            </div>
           </div>
 
           <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginBottom: 12 }}>
@@ -920,6 +1295,13 @@ export const AssetPlanModal: React.FC<AssetPlanModalProps> = ({
             <Check size={15} /> Lưu Kế Hoạch Asset
           </button>
         </div>
+
+        {/* SFX Persistent Library Management Modal */}
+        <SfxLibraryModal
+          isOpen={showLibraryModal}
+          onClose={() => setShowLibraryModal(false)}
+          onAssetChanged={handleRefreshSfxAssets}
+        />
       </div>
     </div>
   );

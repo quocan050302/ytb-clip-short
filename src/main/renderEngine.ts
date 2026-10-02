@@ -59,8 +59,11 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
     outputPath, editPlan, relevantSegments, ffmpegPath, ffprobePath,
     onProgress, onLog } = opts;
 
-  onProgress(30, 'Xây dựng filter graph FFmpeg...');
-  onLog(`[RenderEngine][${clipId}] Bắt đầu render với FFmpeg (ffmpeg-fallback engine)`);
+  const reportProgress = onProgress || (() => {});
+  const reportLog = onLog || (() => {});
+
+  reportProgress(30, 'Xây dựng filter graph FFmpeg...');
+  reportLog(`[RenderEngine][${clipId}] Bắt đầu render với FFmpeg (ffmpeg-fallback engine)`);
 
   const tempPath = path.join(projectDir, `re_tmp_${clipId}.mp4`);
   if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
@@ -71,13 +74,13 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
 
   // Visual overlay inputs (meme images / stickers)
   const visualInputs: Array<{ inputIdx: number; plan: VisualOverlayPlan }> = [];
-  for (const vo of editPlan.visualOverlays) {
+  for (const vo of (editPlan.visualOverlays || [])) {
     if (vo.type === 'meme-image' || vo.type === 'sticker') {
       if (fs.existsSync(vo.assetPath)) {
         ffmpegArgs.push('-i', vo.assetPath);
         visualInputs.push({ inputIdx: nextInput++, plan: vo });
       } else {
-        onLog(`[RenderEngine] WARN: Visual overlay asset missing: ${vo.assetPath} – skipping`);
+        reportLog(`[RenderEngine] WARN: Visual overlay asset missing: ${vo.assetPath} – skipping`);
       }
     }
   }
@@ -91,13 +94,15 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
 
   // SFX / audio event inputs
   const audioInputs: Array<{ inputIdx: number; plan: AudioEventPlan }> = [];
-  for (const ae of editPlan.audioEvents) {
+  for (const ae of (editPlan.audioEvents || [])) {
     if (ae.type === 'sfx' || ae.type === 'stinger') {
       if (fs.existsSync(ae.assetPath)) {
         ffmpegArgs.push('-i', ae.assetPath);
         audioInputs.push({ inputIdx: nextInput++, plan: ae });
       } else {
-        onLog(`[RenderEngine] WARN: Audio event asset missing: ${ae.assetPath} – skipping`);
+        reportLog(
+          `[RenderEngine][${clipId}] LỖI: File SFX "${ae.assetPath}" cho sự kiện "${ae.id}" không tồn tại trên ổ đĩa – bỏ qua sự kiện này (không tự thay thế bằng âm thanh khác)`
+        );
       }
     }
   }
@@ -121,7 +126,7 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
   currentVLabel = 'v_reframe';
 
   // Step 2: Effects (zoom-punch, shake, flash, vignette, color-grade)
-  const sortedEffects = [...editPlan.effects].sort((a, b) => a.start - b.start);
+  const sortedEffects = [...(editPlan.effects || [])].sort((a, b) => a.start - b.start);
   currentVLabel = applyEffects(vfChains, currentVLabel, sortedEffects, candidate.duration);
 
   // Step 3: Captions (ASS burn-in)
@@ -199,7 +204,16 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
 
   // ── Audio filter graph ─────────────────────────────────────────────────────
   const afChains: string[] = [];
-  const mixLabels: string[] = ['[0:a]'];
+  const hasBaseAudio = await probeHasAudio(cutVideoPath, ffprobePath);
+  let baseAudioLabel = '[0:a]';
+  if (!hasBaseAudio) {
+    onLog(`[RenderEngine][${clipId}] Video nguồn không có audio stream -> tạo silent audio base`);
+    afChains.push(
+      `aevalsrc=0:d=${candidate.duration.toFixed(2)}:s=44100:c=stereo[a_silent_base]`
+    );
+    baseAudioLabel = '[a_silent_base]';
+  }
+  const mixLabels: string[] = [baseAudioLabel];
 
   // BGM with ducking
   if (bgmInputIdx !== -1) {
@@ -233,19 +247,35 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
     mixLabels.push('[a_bgm]');
   }
 
-  // SFX events
-  audioInputs.forEach(({ inputIdx, plan }, i) => {
-    const delayMs = Math.max(0, Math.round(plan.triggerAt * 1000));
+  // SFX events: probe real file duration, clamp fades, volume, internal afade then adelay
+  for (let i = 0; i < audioInputs.length; i++) {
+    const { inputIdx, plan } = audioInputs[i];
+    const fileDur = await probeAudioDuration(plan.assetPath, ffprobePath);
+    const clipDur = candidate.duration;
+    const trig = Math.max(0, Math.min(clipDur - 0.05, plan.triggerAt));
+    const maxPossibleDur = Math.max(0.1, clipDur - trig);
+    const chosenDur = (plan.duration && plan.duration > 0) ? plan.duration : fileDur;
+    const playDuration = Math.min(chosenDur, fileDur, maxPossibleDur);
+
+    const clampedFadeIn = Math.min(Math.max(0, plan.fadeIn ?? 0.05), playDuration / 2);
+    const clampedFadeOut = Math.min(Math.max(0, plan.fadeOut ?? 0.2), playDuration - clampedFadeIn);
+    const fadeOutStart = Math.max(0, playDuration - clampedFadeOut);
+    const clampedVolume = Math.max(0.05, Math.min(2.0, plan.volume ?? 0.85));
+    const delayMs = Math.max(0, Math.round(trig * 1000));
     const label = `a_sfx_${i}`;
+
     afChains.push(
-      `[${inputIdx}:a]volume=${plan.volume},` +
-      `adelay=${delayMs}|${delayMs},` +
-      `afade=t=in:st=0:d=${plan.fadeIn},` +
-      `afade=t=out:st=${Math.max(0, plan.triggerAt + 1.5 - plan.fadeOut).toFixed(2)}:d=${plan.fadeOut}` +
+      `[${inputIdx}:a]atrim=end=${playDuration.toFixed(3)},` +
+      `asetpts=PTS-STARTPTS,` +
+      `aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,` +
+      `volume=${clampedVolume.toFixed(2)},` +
+      `afade=t=in:st=0:d=${clampedFadeIn.toFixed(3)},` +
+      `afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${clampedFadeOut.toFixed(3)},` +
+      `adelay=${delayMs}|${delayMs}` +
       `[${label}]`
     );
     mixLabels.push(`[${label}]`);
-  });
+  }
 
   // ── Assemble filter_complex ────────────────────────────────────────────────
   let filterComplex = '';
@@ -253,11 +283,14 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
     filterComplex += vfChains.join(';') + ';';
   }
 
-  let finalALabel = '0:a';
+  let finalALabel = hasBaseAudio ? '0:a' : 'a_silent_base';
   if (mixLabels.length > 1) {
     filterComplex += afChains.join(';') + ';';
-    filterComplex += `${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:dropout_transition=2[a_out]`;
+    filterComplex += `${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:dropout_transition=2,alimiter=limit=0.95:level=true:attack=5:release=50[a_out]`;
     finalALabel = 'a_out';
+  } else if (!hasBaseAudio) {
+    filterComplex += afChains.join(';') + ';';
+    finalALabel = 'a_silent_base';
   }
 
   ffmpegArgs.push(
@@ -276,12 +309,12 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
     '-y',
   );
 
-  onProgress(50, 'Đang render FFmpeg (ffmpeg-fallback)...');
+  reportProgress(50, 'Đang render FFmpeg (ffmpeg-fallback)...');
 
   const { promise, cancel } = runSpawn(ffmpegPath, ffmpegArgs, {
     onStderr: (chunk) => {
       if (chunk.includes('time=')) {
-        onProgress(80, 'Encoding MP4...');
+        reportProgress(80, 'Encoding MP4...');
       }
     },
   });
@@ -295,7 +328,7 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
   }
 
   // ── ffprobe validation ─────────────────────────────────────────────────────
-  onProgress(90, 'Kiểm tra file output bằng ffprobe...');
+  reportProgress(90, 'Kiểm tra file output bằng ffprobe...');
   const probeRes = await runSpawn(ffprobePath, [
     '-v', 'quiet', '-print_format', 'json',
     '-show_format', '-show_streams', tempPath,
@@ -315,11 +348,11 @@ export async function renderWithEditPlan(opts: RenderOptions): Promise<RenderRes
   if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
   fs.renameSync(tempPath, outputPath);
 
-  onLog(
+  reportLog(
     `[RenderEngine][${clipId}] ✅ Render xong (engine: ffmpeg-fallback). ` +
     `Output: ${outputPath} | Duration: ${duration.toFixed(2)}s`
   );
-  onProgress(100, 'Hoàn tất render');
+  reportProgress(100, 'Hoàn tất render');
 
   return { outputPath, engine: 'ffmpeg-fallback', duration };
 }
@@ -474,3 +507,41 @@ function generateWordLevelAss(
   }
   fs.writeFileSync(outPath, content, 'utf8');
 }
+
+/**
+ * Probe audio duration using ffprobe
+ */
+export async function probeAudioDuration(filePath: string, ffprobePath: string = 'ffprobe'): Promise<number> {
+  try {
+    const res = await runSpawn(ffprobePath, [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      filePath,
+    ]).promise;
+    if (res.code === 0 && res.stdout.trim()) {
+      const dur = parseFloat(res.stdout.trim());
+      if (!isNaN(dur) && dur > 0) return dur;
+    }
+  } catch {}
+  return 1.5;
+}
+
+/**
+ * Check if a media file contains an audio stream
+ */
+export async function probeHasAudio(filePath: string, ffprobePath: string = 'ffprobe'): Promise<boolean> {
+  try {
+    const res = await runSpawn(ffprobePath, [
+      '-v', 'error',
+      '-select_streams', 'a',
+      '-show_entries', 'stream=codec_type',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      filePath,
+    ]).promise;
+    return res.code === 0 && res.stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+

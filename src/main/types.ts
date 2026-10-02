@@ -128,6 +128,62 @@ export interface AssetItem {
   fingerprint: string;
   mood?: string;
   tags: string[];
+  category?: string;
+  confidence?: number;
+  reviewStatus?: 'approved' | 'needs_review' | 'pending';
+  originalFilename?: string;
+  description?: string;
+}
+
+export interface ImportedSfxMetadata {
+  id: string;
+  originalFilename: string;
+  displayName: string;
+  storedFilename: string;
+  filePath: string;
+  sha256: string;
+  duration: number;
+  sampleRate?: number;
+  channels?: number;
+  tags: string[];
+  category: string;
+  description: string;
+  confidence: number;
+  reviewStatus: 'approved' | 'needs_review' | 'pending';
+  license: string; // Defaults to 'Chưa xác nhận'
+  importedAt: string;
+}
+
+export interface ImportResult {
+  imported: ImportedSfxMetadata[];
+  duplicates: Array<{ filename: string; sha256: string; existingName: string }>;
+  failed: Array<{ path: string; error: string }>;
+}
+
+export interface SfxChoice {
+  asset: AssetItem;
+  score: number;
+  reason: string;
+}
+
+export interface CatalogStats {
+  totalSfx: number;
+  defaultWavCount: number;
+  repoMp3Count: number;
+  importedCount: number;
+  failedFiles: Array<{ path: string; error: string }>;
+}
+
+export interface MomentCandidate {
+  id: string;
+  timestamp: number; // seconds relative to clip start
+  type: string;
+  evidence: string;
+  confidence: number; // 0.0 - 1.0
+  suggestedSfx?: AssetItem;
+  reason?: string;
+  status: 'suggested' | 'approved' | 'rejected' | 'modified';
+  topChoices?: SfxChoice[];
 }
 
 // ─── Legacy Beat / Asset Plan (kept for backward compat) ─────────────────────
@@ -150,10 +206,26 @@ export interface DuckingSettings {
   fadeOutDuration: number;
 }
 
+export interface PlannedSfxEvent {
+  id: string;
+  asset: AssetItem;
+  triggerAt: number;       // seconds relative to clip start
+  duration?: number;       // play duration in seconds, <= asset file duration
+  volume: number;          // 0.0 - 1.5, valid and clamped
+  fadeIn: number;          // seconds
+  fadeOut: number;         // seconds
+  enabled: boolean;        // whether event will be rendered
+  sourceBeatId?: string;   // beat id if suggested from beat
+  origin: 'auto' | 'manual';
+  reason?: string;
+}
+
 export interface ClipAssetPlan {
   clipId: string;
   musicTrack: AssetItem | null;
   beats: BeatEvent[];
+  sfxEvents?: PlannedSfxEvent[];
+  suggestedMoments?: MomentCandidate[];
   duckingSettings: DuckingSettings;
 }
 
@@ -215,6 +287,7 @@ export interface AudioEventPlan {
   volume: number;
   fadeIn: number;
   fadeOut: number;
+  duration?: number;
   momentId?: string;
 }
 
@@ -275,6 +348,20 @@ export type ClipRenderStatus =
   | 'failed'
   | 'canceled';
 
+export interface ThumbnailFrame {
+  id: string;
+  timestamp: number;
+  path: string;
+  score: number;
+  reason: string;
+}
+
+export interface ThumbnailLayout {
+  textPosition: 'top' | 'middle' | 'bottom';
+}
+
+export type PublishStatus = 'pending' | 'generating' | 'ready' | 'needs_review' | 'failed';
+
 export interface RenderedClip {
   id: string;
   candidateId: string;
@@ -282,6 +369,18 @@ export interface RenderedClip {
   status: ClipRenderStatus;
   progress: number;
   outputPath?: string;
+  /** Upload package generated independently of the MP4. */
+  thumbnailPath?: string;
+  publishTitle?: string;
+  thumbnailHook?: string;
+  hashtags?: string[];
+  metadataPath?: string;
+  publishWarning?: string;
+  thumbnailFrames?: ThumbnailFrame[];
+  selectedThumbnailFrameId?: string;
+  thumbnailLayout?: ThumbnailLayout;
+  publishTitleOptions?: string[];
+  publishStatus?: PublishStatus;
   hypitBuildId?: string;
   error?: string;
   duration?: number;

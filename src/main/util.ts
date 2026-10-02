@@ -109,6 +109,94 @@ export function runSpawn(
 }
 
 /**
+ * Execute command and buffer binary stdout (useful for raw video frames, image data)
+ */
+export function runSpawnBinary(
+  command: string,
+  args: string[],
+  options: RunCommandOptions = {}
+): { promise: Promise<{ code: number; stdout: Buffer; stderr: string }>; cancel: () => void } {
+  let child: ReturnType<typeof spawn> | null = null;
+  let killed = false;
+
+  const cancel = () => {
+    killed = true;
+    if (child && !child.killed) {
+      try {
+        child.kill('SIGTERM');
+      } catch (err) {
+        // Ignore kill error
+      }
+    }
+  };
+
+  const promise = new Promise<{ code: number; stdout: Buffer; stderr: string }>((resolve, reject) => {
+    const { timeoutMs, env, ...spawnOpts } = options;
+
+    const combinedEnv = {
+      ...process.env,
+      PATH: [
+        '/opt/homebrew/bin',
+        '/opt/homebrew/sbin',
+        '/usr/local/bin',
+        process.env.PATH || '',
+      ].filter(Boolean).join(':'),
+      ...env,
+    };
+
+    try {
+      child = spawn(command, args, {
+        ...spawnOpts,
+        env: combinedEnv,
+        windowsHide: true,
+      });
+    } catch (err) {
+      return reject(err);
+    }
+
+    const stdoutChunks: Buffer[] = [];
+    let stderr = '';
+    let timer: NodeJS.Timeout | null = null;
+
+    if (timeoutMs && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        cancel();
+        reject(new Error(`Command timed out after ${timeoutMs}ms: ${command} ${args.join(' ')}`));
+      }, timeoutMs);
+    }
+
+    if (child.stdout) {
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdoutChunks.push(chunk);
+      });
+    }
+
+    if (child.stderr) {
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (data: string) => {
+        stderr += data;
+      });
+    }
+
+    child.on('error', (err) => {
+      if (timer) clearTimeout(timer);
+      reject(err);
+    });
+
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      resolve({
+        code: code ?? (killed ? 130 : 0),
+        stdout: Buffer.concat(stdoutChunks),
+        stderr,
+      });
+    });
+  });
+
+  return { promise, cancel };
+}
+
+/**
  * Format seconds into mm:ss or hh:mm:ss
  */
 export function formatTime(seconds: number): string {

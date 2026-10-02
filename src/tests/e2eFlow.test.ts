@@ -106,6 +106,12 @@ Hãy áp dụng ngay để tạo ra những video shorts triệu view nhé.
     expect(renderedClip.status).toBe('completed');
     expect(renderedClip.outputPath).toBeDefined();
     expect(fs.existsSync(renderedClip.outputPath!)).toBe(true);
+    expect(renderedClip.thumbnailPath && fs.existsSync(renderedClip.thumbnailPath)).toBe(true);
+    expect(renderedClip.metadataPath && fs.existsSync(renderedClip.metadataPath)).toBe(true);
+    const publish = JSON.parse(fs.readFileSync(renderedClip.metadataPath!, 'utf8'));
+    expect(publish.thumbnailHook).toBe(renderedClip.thumbnailHook);
+    expect(publish.title).toBe(renderedClip.publishTitle);
+    expect(publish.hashtags).toContain('#Shorts');
 
     // 4. Verify output MP4 with ffprobe
     const { promise: probePromise } = runSpawn('ffprobe', [

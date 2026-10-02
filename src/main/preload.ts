@@ -1,14 +1,25 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   AssetItem,
+  CatalogStats,
   ClipAssetPlan,
   ClipCandidate,
   EnvironmentStatus,
+  ImportedSfxMetadata,
+  ImportResult,
   JobMetadata,
   JobSettings,
   LogEntry,
   RenderedClip,
 } from './types';
+
+export interface PublishPackageUpdates {
+  title?: string;
+  hook?: string;
+  hashtags?: string[];
+  selectedFrameId?: string;
+  textPosition?: 'top' | 'middle' | 'bottom';
+}
 
 export interface IElectronAPI {
   selectVideoFile: () => Promise<string | null>;
@@ -19,10 +30,24 @@ export interface IElectronAPI {
   analyzeVideo: (jobId: string, srtContent?: string) => Promise<JobMetadata>;
   updateCandidates: (jobId: string, candidates: ClipCandidate[]) => Promise<JobMetadata>;
   updateCandidateAssetPlan: (jobId: string, candidateId: string, plan: ClipAssetPlan) => Promise<JobMetadata>;
+  rescanCandidateSfx: (jobId: string, candidateId: string) => Promise<JobMetadata>;
   getAllAssets: (type?: 'meme' | 'sfx' | 'music') => Promise<AssetItem[]>;
+  getCatalogStats: () => Promise<CatalogStats>;
   getTrends: () => Promise<any[]>;
   renderAllCandidates: (jobId: string) => Promise<JobMetadata>;
   renderSingleClip: (jobId: string, clipId: string) => Promise<RenderedClip>;
+  updatePublishPackage: (
+    jobId: string,
+    clipId: string,
+    updatesOrTitle: PublishPackageUpdates | string,
+    hook?: string,
+    hashtags?: string[]
+  ) => Promise<JobMetadata>;
+  regeneratePublishPackage: (
+    jobId: string,
+    clipId: string,
+    resetSuggestions?: boolean
+  ) => Promise<JobMetadata>;
   cancelClipRender: (jobId: string, clipId: string) => Promise<void>;
   getAllJobs: () => Promise<JobMetadata[]>;
   getJob: (jobId: string) => Promise<JobMetadata | null>;
@@ -31,6 +56,13 @@ export interface IElectronAPI {
   showItemInFolder: (targetPath: string) => Promise<void>;
   onJobUpdated: (callback: (job: JobMetadata) => void) => () => void;
   onLog: (callback: (log: LogEntry) => void) => () => void;
+
+  // SFX Import & Management
+  importSfxDialog: (mode?: 'files' | 'folder') => Promise<ImportResult | null>;
+  importSfxPaths: (paths: string[]) => Promise<ImportResult>;
+  getImportedSfx: () => Promise<ImportedSfxMetadata[]>;
+  updateImportedSfx: (id: string, updates: Partial<ImportedSfxMetadata>) => Promise<ImportedSfxMetadata>;
+  deleteImportedSfx: (id: string) => Promise<boolean>;
 }
 
 const api: IElectronAPI = {
@@ -46,12 +78,19 @@ const api: IElectronAPI = {
     ipcRenderer.invoke('job:updateCandidates', jobId, candidates),
   updateCandidateAssetPlan: (jobId, candidateId, plan) =>
     ipcRenderer.invoke('job:updateAssetPlan', jobId, candidateId, plan),
+  rescanCandidateSfx: (jobId, candidateId) =>
+    ipcRenderer.invoke('job:rescanCandidateSfx', jobId, candidateId),
   getAllAssets: (type) => ipcRenderer.invoke('asset:getAll', type),
+  getCatalogStats: () => ipcRenderer.invoke('asset:getCatalogStats'),
   getTrends: () => ipcRenderer.invoke('asset:getTrends'),
   renderAllCandidates: (jobId) =>
     ipcRenderer.invoke('job:renderAll', jobId),
   renderSingleClip: (jobId, clipId) =>
     ipcRenderer.invoke('job:renderSingleClip', jobId, clipId),
+  updatePublishPackage: (jobId, clipId, updatesOrTitle, hook, hashtags) =>
+    ipcRenderer.invoke('job:updatePublishPackage', jobId, clipId, updatesOrTitle, hook, hashtags),
+  regeneratePublishPackage: (jobId, clipId, resetSuggestions) =>
+    ipcRenderer.invoke('job:regeneratePublishPackage', jobId, clipId, resetSuggestions),
   cancelClipRender: (jobId, clipId) =>
     ipcRenderer.invoke('job:cancelClip', jobId, clipId),
   getAllJobs: () => ipcRenderer.invoke('job:getAll'),
@@ -70,6 +109,11 @@ const api: IElectronAPI = {
     ipcRenderer.on('job:log', handler);
     return () => ipcRenderer.removeListener('job:log', handler);
   },
+  importSfxDialog: (mode) => ipcRenderer.invoke('dialog:importSfx', mode),
+  importSfxPaths: (paths) => ipcRenderer.invoke('asset:importSfxPaths', paths),
+  getImportedSfx: () => ipcRenderer.invoke('asset:getImportedSfx'),
+  updateImportedSfx: (id, updates) => ipcRenderer.invoke('asset:updateImportedSfx', id, updates),
+  deleteImportedSfx: (id) => ipcRenderer.invoke('asset:deleteImportedSfx', id),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', api);

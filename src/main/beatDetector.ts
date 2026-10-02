@@ -106,7 +106,7 @@ export class BeatDetector {
         }
       }
 
-      // FAIL BEAT
+      // FAIL BEAT (placed after speech ends in pause to avoid speech overlap)
       else if (
         text.includes('thất bại') ||
         text.includes('sai lầm') ||
@@ -116,14 +116,15 @@ export class BeatDetector {
         text.includes('fail') ||
         text.includes('nhầm')
       ) {
-        if (!beats.some((b) => Math.abs(b.timestamp - seg.relStart) < 2.0)) {
+        const failTimestamp = Math.min(clipDuration - 0.2, Math.round((seg.relEnd + 0.1) * 10) / 10);
+        if (!beats.some((b) => Math.abs(b.timestamp - failTimestamp) < 2.0)) {
           beats.push({
             id: `beat_fail_${Math.round(seg.relStart)}`,
             type: 'fail',
-            timestamp: Math.round(seg.relStart * 10) / 10,
+            timestamp: failTimestamp,
             duration: 1.4,
             confidence: 0.84,
-            reason: `Tình huống ngượng ngùng / sự cố hài hước: "${seg.text.substring(0, 40)}"`,
+            reason: `Tình huống ngượng ngùng / sự cố hài hước kết thúc câu: "${seg.text.substring(0, 40)}"`,
           });
         }
       }

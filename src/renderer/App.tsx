@@ -9,6 +9,7 @@ import { OutputGallery } from './components/OutputGallery';
 import { CostPreflightModal } from './components/CostPreflightModal';
 import { JobsDrawer } from './components/JobsDrawer';
 import { AssetPlanModal } from './components/AssetPlanModal';
+import { SfxLibraryModal } from './components/SfxLibraryModal';
 import {
   ClipAssetPlan,
   ClipCandidate,
@@ -21,20 +22,21 @@ import {
 export const App: React.FC = () => {
   // System environment status
   const [envStatus, setEnvStatus] = useState<EnvironmentStatus | null>(null);
+  const [showSfxLibraryModal, setShowSfxLibraryModal] = useState<boolean>(false);
 
-  // Default settings (Auto Asset Mode: captions, BGM ducking, SFX, and meme overlays enabled by default)
+  // Text belongs on the standalone thumbnail; the exported video starts clean.
   const [settings, setSettings] = useState<JobSettings>({
     targetClipCount: 5,
     clipDurationMin: 30,
     clipDurationMax: 45,
     aspectRatio: '9:16',
     preset: 'reaction',
-    captions: true,
+    captions: false,
     bgm: true,
     sfx: true,
     broll: true,
     mode: 'local',
-    wordLevelCaptions: true,
+    wordLevelCaptions: false,
     callouts: false,
     visualEffects: true,
     hdEnhance: true,
@@ -275,6 +277,7 @@ export const App: React.FC = () => {
         envStatus={envStatus}
         onOpenHistory={() => setShowJobsDrawer(true)}
         onNewJob={handleNewJob}
+        onOpenSfxLibrary={() => setShowSfxLibraryModal(true)}
       />
 
       {/* Workflow Step Navigation */}
@@ -382,6 +385,18 @@ export const App: React.FC = () => {
                 job={currentJob}
                 onOpenFolder={handleOpenFolder}
                 onShowInFolder={handleShowInFolder}
+                onUpdatePackage={async (clipId, updates) => {
+                  const updated = await window.electronAPI.updatePublishPackage(
+                    currentJob.id, clipId, updates
+                  );
+                  setCurrentJob(updated);
+                }}
+                onRegeneratePackage={async (clipId, resetSuggestions) => {
+                  const updated = await window.electronAPI.regeneratePublishPackage(
+                    currentJob.id, clipId, resetSuggestions
+                  );
+                  setCurrentJob(updated);
+                }}
               />
             </>
           )}
@@ -402,7 +417,9 @@ export const App: React.FC = () => {
       {candidateForAssetPlan && (
         <AssetPlanModal
           candidate={candidateForAssetPlan}
+          jobId={currentJob?.id}
           onSave={handleSaveAssetPlan}
+          onPlanUpdatedInJob={(updatedJob) => setCurrentJob(updatedJob)}
           onClose={() => setCandidateForAssetPlan(null)}
         />
       )}
@@ -415,6 +432,12 @@ export const App: React.FC = () => {
         onSelectJob={handleSelectJobFromHistory}
         onDeleteJob={handleDeleteJobFromHistory}
         onClose={() => setShowJobsDrawer(false)}
+      />
+
+      {/* SFX Persistent Library Management Modal */}
+      <SfxLibraryModal
+        isOpen={showSfxLibraryModal}
+        onClose={() => setShowSfxLibraryModal(false)}
       />
     </div>
   );
